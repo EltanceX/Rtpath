@@ -26,9 +26,22 @@
 
 对账以停止写入后的独立遍历为准，比较 `(范围, 原始相对路径, 类型, 大小, mtime)`。对故障测试记录受影响范围、实际补扫目录数和恢复耗时。通知语义未覆盖的写入（如部分 `mmap` 写入）用于验证手动校验能修正结果。
 
+## 监听覆盖与缺口测试
+
+按监听进程、挂载视图和写入入口分组。每组在同一已授权夹具内执行创建、写入、重命名和删除。至少覆盖这些组合。
+
+| 监听端 | 写入端 | 核对重点 |
+| --- | --- | --- |
+| 普通 UID，`/storage/emulated/<user>` | 普通应用从同一共享存储入口写入 | 基本事件、失败的目录注册、实际可读范围。 |
+| 普通 UID，共享存储视图 | Root 测试进程从对应 `/data/media/<user>` 写入 | FUSE 跨视图事件是否到达。若漏报，按部分覆盖显示，并验证补扫后可搜索到变化。 |
+| RootService，`/data/media/<user>` | 普通应用从共享存储入口写入 | 后端视图收到的事件，以及存储映射后同一文件是否只索引一次。 |
+| RootService，原生共享存储或受控 Root 专有目录 | Root 测试进程从对应原生入口写入 | 名称、元数据和范围限制。普通查询只返回普通权限范围。 |
+
+记录监听进程 UID、挂载命名空间和挂载 ID，保存每组预期与实际事件、可监听与成功注册目录数、缺失的事件类型、缺口原因以及补扫目录和条目数。注入内核队列溢出及应用内队列超限，分别核对恢复范围。对权限变化、视图重连和重复、迟到事件，核对状态与事务发布。按已知父目录恢复时，旁支的已提交记录应继续可查。相关 Android 对照见 [Anything](open-source-references.md#anything)。
+
 ## fanotify 探针
 
-从将来实际运行监听的 Root 服务进程执行，分别记录目标挂载、当前能力和系统调用结果。按实际设备分别测试 `/data` 及共享存储的 FUSE 视图，确认监测范围和真实文件事件一致。探针用临时样本验证 `CREATE`、`DELETE`、写入和跨目录移动，记录是否收到携带双方名称的 `FAN_RENAME`、句柄能否映射为索引范围，以及不可用时能否切换到 `inotify`。编译头文件包含常量仅证明可构建，运行结果决定启用范围。
+从将来实际运行监听的 Root 服务进程执行，分别记录目标挂载、当前能力和系统调用结果。按实际设备分别测试 `/data` 及共享存储的 FUSE 视图，确认监测范围和真实文件事件一致。探针用临时样本验证 `CREATE`、`DELETE`、写入和跨目录移动，记录是否收到携带双方名称的 `FAN_RENAME`、句柄能否映射为索引范围，以及不可用时能否切换到 `inotify`。编译头文件包含常量仅证明可构建，运行结果决定启用范围。在同一个已验证挂载点用两后端运行同一夹具，并比较事件到达、目录移动成本和溢出恢复。参考 [Kestrel](open-source-references.md#kestrel)的监听和快照恢复。
 
 核查过的 AOSP Android 14 / 5.15 和 Android 16 / 6.12 arm64 GKI defconfig 均未显式启用默认关闭的 `CONFIG_FANOTIFY`。基于厂商内核的手机需要独立实测。 [AOSP 5.15 Kconfig](https://android.googlesource.com/kernel/common/+/refs/heads/android14-5.15/fs/notify/fanotify/Kconfig) · [AOSP 5.15 配置](https://android.googlesource.com/kernel/common/+/refs/heads/android14-5.15/arch/arm64/configs/gki_defconfig) · [AOSP 6.12 配置](https://android.googlesource.com/kernel/common/+/refs/heads/android16-6.12/arch/arm64/configs/gki_defconfig)
 
@@ -43,6 +56,12 @@
 
 真机性能优先用 Profile APK。建库每种规模至少三轮，记录预热过程以及冷热缓存条件。查询与单文件刷新分别运行足够样本计算 P50 和 P95，首轮建议每类至少 100 次。事件起止点使用同一单调时钟，分别保留数据库提交和 UI 可见结果的时间。保存构建版本、命令和统计原始结果，以便重跑。
 
+### 同机查询对照
+
+在同一台真机上，用同一份 10 万和 100 万条元数据比较 **SQLite FTS5 + 有界短词回退**与 **内存条目过滤**。两侧使用相同的 Unicode 匹配、过滤、排序和页大小。先和全量参考结果对账，再报告首屏延迟、吞吐、查询进程 PSS、启动载入耗时、索引体积及典型增量批次的更新时间。结果区分冷启动和索引已可查时的热查询。
+
+用例包含无结果、高命中、带引号和标点、前缀与中间子串、组合过滤，以及中文单字和双字出现在名称中间。有界短词查询记录首批响应、拿到首个匹配页和完成查询分别耗时多少，并验证空批次能继续。若短词实测需要优化，再以同样数据对比 bigram，记录写入与体积成本。相关实现见 [Anything](open-source-references.md#anything)、[Android Everything](open-source-references.md#android-everything)和 [Kerything](open-source-references.md#kerything)。
+
 DiskSize 在一台 Android 16 真机的固定样本中，10 万条纯遍历中位数为 0.133 秒，入库并完整发布为 6.635 秒；百万条完整发布为 57.822 秒，终态主库约 987 MiB。这些是参考项目的历史数据，RtPath 应使用自己的精简索引重新测量。 [DiskSize 性能验收](E:/Projects/disksize-android/docs/scan-performance-acceptance.md)
 
-[首版实现方案](v1-design.md) · [首版实现步骤](v1-implementation-steps.md)
+[首版实现方案](v1-design.md) · [首版实现步骤](v1-implementation-steps.md) · [开源实现参考](open-source-references.md)
