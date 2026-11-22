@@ -17,7 +17,7 @@
 | JDK | `D:\Software Environment\jdk-21.0.9` |
 | 参考 Gradle / AGP / Kotlin | 9.3.1 / 9.1.0 / 2.4.0 |
 
-**验收通过时**，Android Debug APK 能运行，C++ JNI 对应两个 ABI 能构建，探针能报告系统版本、SQLite 能力和普通模式可见范围。
+**验收通过时**，Android Debug APK 能运行，C++ JNI 对应两个 ABI 能构建，探针能报告系统版本、SQLite 能力和普通模式可见范围。 本次结果见 [阶段 0 验证记录](phase0-baseline.md)。
 
 ## 1. 跑通普通扫描和索引闭环
 
