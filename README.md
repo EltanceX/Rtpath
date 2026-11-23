@@ -1,59 +1,64 @@
 # RtPath
 
-RtPath 是面向开发者的 Android 文件搜索项目，采用 Flutter、Kotlin 和 C++。支持普通权限和显式 Root 扫描、持久化的文件名索引以及分页搜索。
+![RtPath 应用图标](android/app/src/main/res/mipmap-hdpi/ic_launcher.png)
 
-## 使用
+RtPath 是面向开发者的 Android 文件名搜索工具。它借鉴 Everything 的使用方式，首次扫描后在设备上建立 SQLite 索引，监听文件变更并增量更新。支持 Android 10 及以上版本，提供普通模式和显式授权的 Root 模式。
 
-在首页打开扫描设置，选择应用自有目录或共享存储。相对目录留空时扫描所选位置，填写 `Download` 等相对路径可限定扫描范围。共享存储的授权入口位于扫描设置内。
+## 扫描与搜索
 
-扫描结束后选择索引范围，输入文件名的一部分。可组合 `name:"Main Activity.kt"`（完整名称）、`prefix:Main`（前缀）、`ext:kt`、`path:"src/Feature A"` 和 `size:>=1MiB` 中适用的条件。名称匹配支持中文和字面标点。搜索框旁的语法按钮列出了各个条件的写法。
+1. 在**普通模式**下打开扫描设置，选择应用自有目录或共享存储。填写 `Download` 等相对路径可限定范围，留空则扫描所选位置。共享存储的授权入口位于扫描设置内。
+2. 从工具栏切换到 **Root 模式**，点击「连接 Root」并在设备的 Root 管理器中授权。在扫描设置中输入绝对路径，或从「常用目录」选择应用数据、下载目录、ADB 临时目录等预设，再开始扫描。「Root 挂载视图」列出 Root 服务实际可见的路径。
+3. 扫描完成后，选择索引范围并输入文件名的一部分。支持中文名称和字面标点，也可组合前缀、扩展名、目录和大小条件，例如 `prefix:Main ext:kt path:"src/Feature A"`。用 `name:"Main Activity.kt"` 匹配完整名称，用 `size:>=1MiB` 按大小筛选。
 
-按名称、路径、大小或修改时间排序，滚动至下方继续加载。每条结果显示类型和元数据，并可复制完整路径。重扫期间可以继续查询上次发布的索引。文件发生变化后，可手动扫描相同范围来更新索引。
+结果支持按名称、路径、大小或修改时间排序，向下滚动可继续加载。每条结果显示文件类型图标和元数据，并可复制完整路径。普通与 Root 索引分别保存，重扫时仍可查询上次发布的结果。
 
-在工具栏将「普通」切换为「Root 模式」，点「连接 Root」，并在设备的 Root 管理器确认授权。连接成功后输入实际绝对目录，再开始扫描。挂载视图会列出当前 Android 用户的应用数据和共享存储入口。目录路径中的符号链接可换成挂载视图列出的实际路径。Root 索引独立保存在应用私有目录，断开后仍可在 Root 模式查询上次发布的结果。
+## 实时更新与恢复
+
+- 每种模式继续监听最近一次扫描的范围。文件创建、改写、改名或删除后，索引按事件批量更新。目录移入或改名时会补扫目标子树。搜索界面在滚动停稳后同步已提交的结果。 [增量更新](docs/phase4-inotify.md) · [实时更新时的滚动](docs/root-live-scroll.md)
+- 普通模式使用 `inotify`。Root 模式只在目标挂载通过实际事件与文件句柄探测后启用 `fanotify`，其余范围使用 `inotify`。索引状态显示实际后端。经 FUSE 访问的共享存储可能漏掉底层直写事件，界面会标记部分实时覆盖。 [fanotify 探测与兼容性](docs/phase6-fanotify.md)
+- 事件队列溢出后，若扫描根身份一致，应用会尝试自动重建该范围。应用重启或 Root 断开后仍可搜索历史索引，从历史索引选择「校验并恢复实时更新」可补录间隔期间的变更。Root 范围需要先重新连接 Root。 [恢复行为与设备验收](docs/phase5-recovery.md)
 
 ## 在 Windows 上构建并安装
 
-在项目根目录使用 PowerShell，按本机路径调整参数。
+已验证的工具链包括 Flutter 3.47.9 / Dart 3.13.7、JDK 21、Android SDK Platform 36、Build Tools 36.0.0、NDK 28.2.13676358 和 CMake 3.22.1。APK 包含 `arm64-v8a` 和 `x86_64`。
+
+在项目根目录打开 PowerShell，将 SDK 和 JDK 路径替换为本机实际路径，再从 `adb devices` 的输出中选取设备序列号。
 
 ```powershell
 . ./tools/enter-android-env.ps1 `
-  -FlutterSdk 'E:\Projects\.toolchains\flutter' `
-  -AndroidSdk 'I:\Software\Android\SDK' `
-  -Jdk 'D:\Software Environment\jdk-21.0.9'
+  -FlutterSdk '<Flutter SDK 路径>' `
+  -AndroidSdk '<Android SDK 路径>' `
+  -Jdk '<JDK 路径>'
 
+adb devices
 flutter pub get
 flutter build apk --debug --target-platform 'android-arm64,android-x64'
 ./tools/install-android-apk.ps1 -Serial '<device-id>' `
-  -Apk 'build/app/outputs/flutter-apk/app-debug.apk' -UseRoot
+  -Apk 'build/app/outputs/flutter-apk/app-debug.apk'
 adb -s '<device-id>' shell am start -W -n io.github.eltancex.rtpath/.MainActivity
 ```
 
-已授权 Root 的开发机通过 `su` 调用包管理器安装，避免等待普通 USB 安装确认。普通设备可省略 `-UseRoot`。安装后应用以自己的普通 UID 运行。需要调试已启动的应用时可用 `flutter attach -d '<device-id>'`。
+设备已授权 ADB Shell 使用 `su` 时，可给安装脚本追加 `-UseRoot`，通过包管理器安装并跳过普通 USB 安装确认。应用启动后以自己的普通 UID 运行。需要调试时可执行 `flutter attach -d '<device-id>'`。
 
-从首页工具栏打开能力检测，可查看 Android、ABI、应用 UID、SQLite 版本和普通进程的挂载视图。连接 Root 后，扫描设置中的「探测 fanotify」会从实际 Root 进程验证选定挂载。事件夹具使用同挂载的应用缓存。[阶段 6 Root fanotify](docs/phase6-fanotify.md)
+## 实现与验证
 
-## 验证
+Flutter 负责搜索界面与分页，Kotlin 负责 Android 权限、Root 服务连接和 SQLite 索引，原生 C++ 负责目录遍历及文件事件监听。首页的「能力检测」可查看应用 UID、SQLite 版本和普通进程挂载视图。连接 Root 后可在扫描设置中单独运行「探测 fanotify」。 [首版设计](docs/v1-design.md) · [开源项目参考](docs/open-source-references.md)
 
 ```powershell
 flutter analyze
 flutter test
 ```
 
-完成首次 Android APK 构建后，可在已授权 ADB Shell 使用 `su` 的设备上运行真机回归。
+在已授权 ADB Shell 使用 `su` 的真机上运行下列命令，覆盖普通扫描、搜索、共享存储、Root 和索引恢复。脚本会构建并安装独立测试包 `io.github.eltancex.rtpath.testhost`，需在 Root 管理器中为该包单独授权。`-Shared` 适用于 Android 11 及以上。
 
 ```powershell
-./tools/verify-ordinary-scan.ps1 -Serial '<device-id>' -Shared
+./tools/verify-ordinary-scan.ps1 -Serial '<device-id>' -Shared -Root -Recovery
 ```
 
-脚本通过 `su` 安装独立的 `.testhost` 包并运行两轮测试，验证扫描、查询、滚动和索引重启。Android 11+ 可用 `-Shared` 验证共享存储，第二轮会撤销测试包所获授权并检查索引可见性。省略该参数可单测应用内部目录。
-
-加上 `-Root` 可验证受保护目录、传输断开及 fanotify 探测。此用例要求在 Root 管理器中单独允许 `io.github.eltancex.rtpath.testhost` 使用 Root。
-
-在 arm64 真机比较 10 万和 100 万条的 SQLite 与内存查询，可运行以下命令。脚本将原始结果写入 `.local/artifacts/phase2-performance.txt`。
+在 arm64 真机上可运行 10 万和 100 万条的 SQLite 与内存查询对照基准，原始结果保存在 `.local/artifacts/phase2-performance.txt`。
 
 ```powershell
 ./tools/verify-search-performance.ps1 -Serial '<device-id>'
 ```
 
-[阶段 3 Root 验证](docs/phase3-root.md) · [阶段 2 搜索验证与性能](docs/phase2-search.md) · [阶段 1 验证记录](docs/phase1-baseline.md) · [阶段 0 验证记录](docs/phase0-baseline.md) · [首版实现步骤](docs/v1-implementation-steps.md) · [首版设计](docs/v1-design.md)
+[首版实现步骤](docs/v1-implementation-steps.md) · [首版验证计划](docs/v1-validation.md) · [环境与能力探针](docs/phase0-baseline.md) · [普通扫描](docs/phase1-baseline.md) · [搜索与性能](docs/phase2-search.md) · [Root 验证](docs/phase3-root.md)
