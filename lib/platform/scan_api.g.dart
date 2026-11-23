@@ -99,6 +99,8 @@ int _deepHash(Object? value) {
 
 enum ScanState { running, cancelling, completed, partial, cancelled, failed }
 
+enum RootState { idle, requesting, connected, unavailable }
+
 enum EntryKind { file, directory, symlink, other }
 
 enum SearchOrder { name, path, size, modified }
@@ -164,6 +166,80 @@ class ScanLocation {
   @override
   String toString() {
     return 'ScanLocation(id: $id, title: $title, path: $path, shared: $shared, canScan: $canScan)';
+  }
+}
+
+class RootAccess {
+  RootAccess({
+    required this.state,
+    required this.mounts,
+    this.pid,
+    this.uid,
+    this.namespace,
+    this.selinux,
+    this.message,
+  });
+
+  RootState state;
+
+  List<String> mounts;
+
+  int? pid;
+
+  int? uid;
+
+  String? namespace;
+
+  String? selinux;
+
+  String? message;
+
+  List<Object?> _toList() {
+    return <Object?>[state, mounts, pid, uid, namespace, selinux, message];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static RootAccess decode(Object result) {
+    result as List<Object?>;
+    return RootAccess(
+      state: result[0]! as RootState,
+      mounts: (result[1]! as List<Object?>).cast<String>(),
+      pid: result[2] as int?,
+      uid: result[3] as int?,
+      namespace: result[4] as String?,
+      selinux: result[5] as String?,
+      message: result[6] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! RootAccess || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(state, other.state) &&
+        _deepEquals(mounts, other.mounts) &&
+        _deepEquals(pid, other.pid) &&
+        _deepEquals(uid, other.uid) &&
+        _deepEquals(namespace, other.namespace) &&
+        _deepEquals(selinux, other.selinux) &&
+        _deepEquals(message, other.message);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'RootAccess(state: $state, mounts: $mounts, pid: $pid, uid: $uid, namespace: $namespace, selinux: $selinux, message: $message)';
   }
 }
 
@@ -539,29 +615,35 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is ScanState) {
       buffer.putUint8(129);
       writeValue(buffer, value.index);
-    } else if (value is EntryKind) {
+    } else if (value is RootState) {
       buffer.putUint8(130);
       writeValue(buffer, value.index);
-    } else if (value is SearchOrder) {
+    } else if (value is EntryKind) {
       buffer.putUint8(131);
       writeValue(buffer, value.index);
-    } else if (value is ScanLocation) {
+    } else if (value is SearchOrder) {
       buffer.putUint8(132);
-      writeValue(buffer, value.encode());
-    } else if (value is ScanStatus) {
+      writeValue(buffer, value.index);
+    } else if (value is ScanLocation) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    } else if (value is PublishedIndex) {
+    } else if (value is RootAccess) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    } else if (value is SearchEntry) {
+    } else if (value is ScanStatus) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    } else if (value is SearchCursor) {
+    } else if (value is PublishedIndex) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    } else if (value is SearchPage) {
+    } else if (value is SearchEntry) {
       buffer.putUint8(137);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchCursor) {
+      buffer.putUint8(138);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchPage) {
+      buffer.putUint8(139);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -576,21 +658,26 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : ScanState.values[value];
       case 130:
         final value = readValue(buffer) as int?;
-        return value == null ? null : EntryKind.values[value];
+        return value == null ? null : RootState.values[value];
       case 131:
         final value = readValue(buffer) as int?;
-        return value == null ? null : SearchOrder.values[value];
+        return value == null ? null : EntryKind.values[value];
       case 132:
-        return ScanLocation.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : SearchOrder.values[value];
       case 133:
-        return ScanStatus.decode(readValue(buffer)!);
+        return ScanLocation.decode(readValue(buffer)!);
       case 134:
-        return PublishedIndex.decode(readValue(buffer)!);
+        return RootAccess.decode(readValue(buffer)!);
       case 135:
-        return SearchEntry.decode(readValue(buffer)!);
+        return ScanStatus.decode(readValue(buffer)!);
       case 136:
-        return SearchCursor.decode(readValue(buffer)!);
+        return PublishedIndex.decode(readValue(buffer)!);
       case 137:
+        return SearchEntry.decode(readValue(buffer)!);
+      case 138:
+        return SearchCursor.decode(readValue(buffer)!);
+      case 139:
         return SearchPage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -684,6 +771,116 @@ class ScanApi {
       isNullValid: false,
     );
     return pigeonVar_replyValue! as ScanStatus;
+  }
+
+  Future<List<PublishedIndex>> rootIndexes() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.rootIndexes$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return (pigeonVar_replyValue! as List<Object?>).cast<PublishedIndex>();
+  }
+
+  Future<void> connectRoot() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.connectRoot$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
+  }
+
+  Future<void> disconnectRoot() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.disconnectRoot$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
+  }
+
+  Future<RootAccess> rootAccess() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.rootAccess$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as RootAccess;
+  }
+
+  Future<ScanStatus> startRootScan(String absolutePath) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.startRootScan$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[absolutePath],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ScanStatus;
+  }
+
+  Future<List<String>> probeRoot(String absolutePath) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.probeRoot$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[absolutePath],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return (pigeonVar_replyValue! as List<Object?>).cast<String>();
   }
 
   Future<ScanStatus?> status() async {

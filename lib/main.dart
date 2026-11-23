@@ -95,7 +95,8 @@ class _ReportView extends StatelessWidget {
               ),
               subtitle: SelectableText(
                 '${report.nativeAbi} · UID ${report.applicationUid}\n'
-                '${report.kernelRelease}',
+                '${report.kernelRelease}'
+                '${report.mountNamespace == null ? '' : '\n${report.mountNamespace}'}',
               ),
             ),
             const Divider(),
@@ -116,7 +117,10 @@ class _ReportView extends StatelessWidget {
             for (final directory in report.directories)
               _CheckTile(
                 label: directory.label,
-                detail: directory.path,
+                detail: [
+                  directory.path,
+                  directory.mount,
+                ].whereType<String>().join('\n'),
                 error: directory.error,
                 successLabel: '可列目录',
               ),

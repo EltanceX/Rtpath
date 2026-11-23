@@ -26,6 +26,28 @@ class ScanLocation {
 
 enum ScanState { running, cancelling, completed, partial, cancelled, failed }
 
+enum RootState { idle, requesting, connected, unavailable }
+
+class RootAccess {
+  RootAccess({
+    required this.state,
+    required this.mounts,
+    this.pid,
+    this.uid,
+    this.namespace,
+    this.selinux,
+    this.message,
+  });
+
+  RootState state;
+  List<String> mounts;
+  int? pid;
+  int? uid;
+  String? namespace;
+  String? selinux;
+  String? message;
+}
+
 class ScanStatus {
   ScanStatus({
     required this.taskId,
@@ -132,6 +154,22 @@ abstract class ScanApi {
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   ScanStatus startScan(String locationId, String relativePath);
+
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  List<PublishedIndex> rootIndexes();
+
+  void connectRoot();
+
+  void disconnectRoot();
+
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  RootAccess rootAccess();
+
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  ScanStatus startRootScan(String absolutePath);
+
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  List<String> probeRoot(String absolutePath);
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   ScanStatus? status();

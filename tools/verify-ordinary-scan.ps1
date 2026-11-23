@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Serial,
-    [switch]$Shared
+    [switch]$Shared,
+    [switch]$Root
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,6 +17,8 @@ $rtpathPackage = 'io.github.eltancex.rtpath.testhost'
 $rtpathActivity = "$rtpathPackage/io.github.eltancex.rtpath.MainActivity"
 $rtpathTarget = 'integration_test/scan_test.dart'
 $rtpathApk = Join-Path $rtpathRoot 'build/app/outputs/apk/debug/app-debug.apk'
+$rtpathRun = [guid]::NewGuid().ToString('N')
+$rtpathFixture = if ($Root) { '/data/local/tmp/rtpath-root-' + [guid]::NewGuid().ToString('N') } else { '' }
 
 function Invoke-RtPathTestRun([string]$ExpectedLog) {
     & $rtpathAdb -s $Serial shell am force-stop $rtpathPackage
@@ -51,7 +54,7 @@ function Invoke-RtPathTestRun([string]$ExpectedLog) {
             --use-existing-app $rtpathUri --timeout 150
         if ($LASTEXITCODE -ne 0) { throw 'Flutter integration test failed.' }
         $rtpathChecks = & $rtpathAdb -s $Serial logcat -d "--pid=$($rtpathAppPid.Trim())" -s flutter:I |
-            Select-String 'RtPath phase 1|Android \d+ \(API '
+            Select-String 'RtPath phase [123]|Android \d+ \(API '
         $rtpathChecks | Write-Output
         if (-not ($rtpathChecks | Select-String -SimpleMatch $ExpectedLog)) {
             throw "Expected test result missing ($ExpectedLog)."
@@ -65,6 +68,8 @@ Push-Location $rtpathRoot
 try {
     $rtpathDefines = @(
         "RTPATH_TEST_SHARED=$($Shared.IsPresent.ToString().ToLowerInvariant())"
+        "RTPATH_ROOT_FIXTURE=$rtpathFixture"
+        "RTPATH_TEST_RUN=$rtpathRun"
         'INTEGRATION_TEST_SHOULD_REPORT_RESULTS_TO_NATIVE=false'
     ) | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) }
 
@@ -83,6 +88,11 @@ try {
     }
     & (Join-Path $PSScriptRoot 'install-android-apk.ps1') -Serial $Serial -Apk $rtpathApk -UseRoot
 
+    if ($Root) {
+        $rtpathFixtureCommand = "mkdir -m 700 $rtpathFixture && touch $rtpathFixture/Protected-项目.txt || exit 1; i=0; while [ `$i -lt 24000 ]; do : > $rtpathFixture/item-`$i || exit 1; i=`$((i+1)); done"
+        & $rtpathAdb -s $Serial shell "su -c '$rtpathFixtureCommand'"
+        if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the protected Root test fixture.' }
+    }
     if ($Shared) {
         & $rtpathAdb -s $Serial shell appops set $rtpathPackage MANAGE_EXTERNAL_STORAGE allow
         if ($LASTEXITCODE -ne 0) { throw 'Could not grant shared storage access to the test host.' }
@@ -97,5 +107,8 @@ try {
     }
     Invoke-RtPathTestRun 'persisted generation verified after process restart'
 } finally {
+    if ($Root) {
+        & $rtpathAdb -s $Serial shell "su -c 'rm -rf $rtpathFixture'"
+    }
     Pop-Location
 }

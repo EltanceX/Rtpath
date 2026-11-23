@@ -9,7 +9,9 @@ import java.util.concurrent.Executors
 
 internal class ScanCoordinator private constructor(context: Context) {
     val locations = ScanLocations(context)
-    private val store by lazy { IndexStore(File(context.noBackupFilesDir, "ordinary-index.sqlite")) }
+    val root = RootBackend(context)
+    private val ordinaryStore by lazy { IndexStore(File(context.noBackupFilesDir, "ordinary-index.sqlite")) }
+    private val rootStore by lazy { IndexStore(File(context.noBackupFilesDir, "root-index.sqlite")) }
     private val writer = Executors.newSingleThreadExecutor()
 
     private val lock = Any()
@@ -18,41 +20,57 @@ internal class ScanCoordinator private constructor(context: Context) {
 
     fun indexes(): List<PublishedIndex> {
         val current = locations.list()
-        return store.indexes().filter { it.isAvailable(current) }.map { it.index }
+        return ordinaryStore.indexes().filter { it.isAvailable(current) }.map { it.index }
     }
+
+    fun rootIndexes(): List<PublishedIndex> = rootStore.indexes().map { it.index }
 
     fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?): SearchPage? =
         try {
-            store.search(scopeId, text, order, descending, cursor, locations.list())
+            if (scopeId.startsWith("root:")) {
+                rootStore.search(scopeId, text, order, descending, cursor, listOf(rootLocation))
+            } else {
+                ordinaryStore.search(scopeId, text, order, descending, cursor, locations.list())
+            }
         } catch (error: IllegalArgumentException) {
             throw FlutterError("invalid_query", error.message)
         }
 
     fun status(): ScanStatus? = synchronized(lock) { latest }
 
-    fun start(locationId: String, relativePath: String): ScanStatus {
-        val scope = resolve(locationId, relativePath)
-        return synchronized(lock) {
-            if (latest?.state in listOf(ScanState.RUNNING, ScanState.CANCELLING)) {
-                throw FlutterError("scan_busy", "已有扫描任务在运行")
-            }
-            val generation = UUID.randomUUID().toString()
-            val initial = ScanStatus(generation, scope.id, ScanState.RUNNING, 0, 0, 0, false)
-            latest = initial
-            cancellationRequested = false
-            writer.execute { scan(scope, generation) }
-            initial
-        }
+    fun start(locationId: String, relativePath: String): ScanStatus =
+        startScope(resolve(locationId, relativePath), null)
+
+    fun startRoot(path: String): ScanStatus = try {
+        startScope(rootScope(path), root.requireConnected())
+    } catch (error: IllegalArgumentException) {
+        throw FlutterError("invalid_scope", error.message)
+    } catch (error: RootFailure) {
+        throw FlutterError("root_unavailable", error.message)
     }
 
-    fun cancel(taskId: String): Boolean = synchronized(lock) {
-        val status = latest
-        if (status?.taskId != taskId || status.state != ScanState.RUNNING) {
-            return@synchronized false
+    private fun startScope(scope: ScanScope, remote: IRootScanner?): ScanStatus = synchronized(lock) {
+        if (latest?.state in listOf(ScanState.RUNNING, ScanState.CANCELLING)) {
+            throw FlutterError("scan_busy", "已有扫描任务在运行")
         }
-        cancellationRequested = true
-        latest = status.copy(state = ScanState.CANCELLING)
-        true
+        val generation = UUID.randomUUID().toString()
+        val initial = ScanStatus(generation, scope.id, ScanState.RUNNING, 0, 0, 0, false)
+        latest = initial
+        cancellationRequested = false
+        writer.execute { scan(scope, generation, remote) }
+        initial
+    }
+
+    fun cancel(taskId: String): Boolean {
+        val cancelRoot = synchronized(lock) {
+            val status = latest
+            if (status?.taskId != taskId || status.state != ScanState.RUNNING) return false
+            cancellationRequested = true
+            latest = status.copy(state = ScanState.CANCELLING)
+            status.scopeId.startsWith("root:")
+        }
+        if (cancelRoot) root.cancel(taskId)
+        return true
     }
 
     private fun resolve(locationId: String, relativePath: String): ScanScope {
@@ -65,38 +83,40 @@ internal class ScanCoordinator private constructor(context: Context) {
         }
     }
 
-    private fun scan(scope: ScanScope, generation: String) {
+    private fun scan(scope: ScanScope, generation: String, remote: IRootScanner?) {
         try {
+            val store = if (remote == null) ordinaryStore else rootStore
             store.open().use { db ->
                 var previous: String? = null
                 try {
                     val outcome = BatchWriter(db, generation).use { batchWriter ->
-                        NativeScanner.walk(
-                            scope.base.toByteArray(Charsets.UTF_8),
-                            scope.relativePath.toByteArray(Charsets.UTF_8),
-                            object : ScanReceiver {
-                                override fun isCancelled() = cancellationRequested
+                        val receiver = object : ScanReceiver {
+                            override fun isCancelled() = cancellationRequested
 
-                                override fun onBatch(batch: ByteArray) {
-                                    if (isCancelled()) return
-                                    batchWriter.write(batch)
-                                    updateStatus { it.copy(entries = batchWriter.count - 1) }
-                                }
+                            override fun onBatch(batch: ByteArray) {
+                                if (isCancelled()) return
+                                batchWriter.write(batch)
+                                updateStatus { it.copy(entries = batchWriter.count - 1) }
+                            }
 
-                                override fun onProblem(operation: String, error: Int) {
-                                    updateStatus {
-                                        if (operation == "mount boundary") {
-                                            it.copy(skippedMounts = it.skippedMounts + 1)
-                                        } else {
-                                            val message = if (error == 0) operation else "$operation: ${Os.strerror(error)}"
-                                            it.copy(issues = it.issues + 1, message = it.message ?: message)
-                                        }
+                            override fun onProblem(operation: String, error: Int) {
+                                updateStatus {
+                                    if (operation == "mount boundary") {
+                                        it.copy(skippedMounts = it.skippedMounts + 1)
+                                    } else {
+                                        val message = if (error == 0) operation else "$operation: ${Os.strerror(error)}"
+                                        it.copy(issues = it.issues + 1, message = it.message ?: message)
                                     }
                                 }
-                            },
+                            }
+                        }
+                        if (remote != null) root.run(remote, generation, scope, receiver)
+                        else NativeScanner.walk(
+                            scope.base.toByteArray(Charsets.UTF_8),
+                            scope.relativePath.toByteArray(Charsets.UTF_8), receiver,
                         )
                     }
-                    if (outcome == NativeScanner.COMPLETE && !cancellationRequested) {
+                    if (remote == null && outcome == NativeScanner.COMPLETE && !cancellationRequested) {
                         check(resolve(scope.locationId, scope.relativePath) == scope) { "扫描位置已变更" }
                     }
                     // Cancellation and the scope pointer commit share one lock.
@@ -108,6 +128,9 @@ internal class ScanCoordinator private constructor(context: Context) {
                                 status.copy(state = ScanState.FAILED, message = status.message ?: "原生扫描失败")
                             else -> {
                                 check(outcome == NativeScanner.COMPLETE)
+                                if (remote != null) {
+                                    check(root.requireConnected() === remote) { "扫描期间 Root 连接已断开" }
+                                }
                                 val partial = status.issues > 0
                                 previous = store.scopeVersion(db, scope.id)
                                 val published = store.publish(db, scope, generation, status.entries, partial)
@@ -154,6 +177,7 @@ internal class ScanCoordinator private constructor(context: Context) {
 
     companion object {
         private const val TAG = "RtPathScan"
+        private val rootLocation = ScanLocation("root", "Root", "/", false, true)
         private var instance: ScanCoordinator? = null
 
         @Synchronized

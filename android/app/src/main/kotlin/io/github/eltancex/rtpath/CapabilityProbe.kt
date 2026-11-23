@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Environment
 import android.system.Os
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import io.github.eltancex.rtpath.scan.NativeScanner
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -34,6 +35,7 @@ internal object CapabilityProbe {
             "kernelRelease" to Os.uname().release,
             "nativeAbi" to nativeAbi,
             "applicationUid" to Os.getuid(),
+            "mountNamespace" to runCatching { Os.readlink("/proc/self/ns/mnt") }.getOrNull(),
             "fileError" to fileError.ifEmpty { null },
             "inotifyError" to inotifyError.ifEmpty { null },
             "sqlite" to sqlite(),
@@ -91,6 +93,9 @@ internal object CapabilityProbe {
                 failure.message ?: failure.javaClass.simpleName
             }
         }
-        return mapOf("label" to label, "path" to file?.absolutePath, "error" to error)
+        val mount = if (error == null && file != null) runCatching {
+            NativeScanner.inspectDirectory(file.absolutePath.toByteArray(Charsets.UTF_8), false, false)
+        }.getOrNull() else null
+        return mapOf("label" to label, "path" to file?.absolutePath, "error" to error, "mount" to mount)
     }
 }

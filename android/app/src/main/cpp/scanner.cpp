@@ -3,20 +3,26 @@
 #include <android/api-level.h>
 #include <jni.h>
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <linux/fanotify.h>
 #include <limits>
 #include <linux/stat.h>
 #include <memory>
+#include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/vfs.h>
 #include <type_traits>
 #include <vector>
 
@@ -125,6 +131,144 @@ Fd openRoot(const std::string& base, std::string_view relative) {
         relative.remove_prefix(slash + 1);
     }
     return directory;
+}
+
+const char* filesystemName(long magic) {
+    switch (static_cast<std::uint32_t>(magic)) {
+        case 0xf2f52010: return "f2fs";
+        case 0x65735546: return "fuse";
+        case 0xef53: return "ext4";
+        case 0x01021994: return "tmpfs";
+        case 0x794c7630: return "overlay";
+        default: return "filesystem";
+    }
+}
+
+std::string probeError(const char* operation, int error) {
+    return std::string(operation) + " errno=" + std::to_string(error) + " (" + std::strerror(error) + ")";
+}
+
+// Match a named directory-entry event rather than any traffic on the filesystem.
+std::string_view eventName(const unsigned char* record, std::size_t size, std::size_t start) {
+    constexpr auto base = offsetof(fanotify_event_info_fid, handle);
+    // The Linux file_handle header has two 32-bit fields before its bytes.
+    constexpr auto handleHeader = sizeof(std::uint32_t) + sizeof(std::int32_t);
+    while (start + sizeof(fanotify_event_info_header) <= size) {
+        fanotify_event_info_header info{};
+        std::memcpy(&info, record + start, sizeof(info));
+        if (info.len < sizeof(info) || info.len > size - start) break;
+        if (info.info_type == FAN_EVENT_INFO_TYPE_DFID_NAME && info.len >= base + handleHeader) {
+            unsigned int handleBytes = 0;
+            std::memcpy(&handleBytes, record + start + base, sizeof(handleBytes));
+            const auto header = base + handleHeader;
+            if (handleBytes < info.len - header) {
+                const auto* name = reinterpret_cast<const char*>(record + start + header + handleBytes);
+                const auto available = info.len - header - handleBytes;
+                const auto length = strnlen(name, available);
+                if (length < available) return {name, length};
+            }
+        }
+        start += info.len;
+    }
+    return {};
+}
+
+std::string exerciseFanotify(int group, int directory) {
+    static std::atomic<unsigned> next{0};
+    const auto prefix = ".rtpath-fanotify-" + std::to_string(getpid()) + "-" + std::to_string(next++);
+    const auto original = prefix + "-create";
+    const auto renamed = prefix + "-rename";
+    if (mkdirat(directory, prefix.c_str(), 0700) != 0) return probeError("mkdirat fixture", errno);
+    {
+        Fd fixture(openat(directory, prefix.c_str(), directoryFlags));
+        int error = 0;
+        if (fixture.get() < 0) {
+            error = errno;
+        } else {
+            Fd marker(openat(fixture.get(), original.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
+            if (marker.get() < 0 || renameat(fixture.get(), original.c_str(), fixture.get(), renamed.c_str()) != 0 ||
+                unlinkat(fixture.get(), renamed.c_str(), 0) != 0) {
+                error = errno;
+                unlinkat(fixture.get(), original.c_str(), 0);
+                unlinkat(fixture.get(), renamed.c_str(), 0);
+            }
+        }
+        if (unlinkat(directory, prefix.c_str(), AT_REMOVEDIR) != 0 && error == 0) error = errno;
+        if (error != 0) return probeError("event fixture", error);
+    }
+    constexpr auto expected = FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO;
+    std::uint64_t found = 0;
+    bool overflow = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    unsigned char data[16 * 1024];
+    while (found != expected && !overflow) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) break;
+        pollfd ready{group, POLLIN, 0};
+        const auto status = poll(&ready, 1, static_cast<int>(remaining));
+        if (status < 0 && errno == EINTR) continue;
+        if (status < 0) return probeError("poll fanotify", errno);
+        if (status == 0) break;
+        const auto length = read(group, data, sizeof(data));
+        if (length < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+        if (length < 0) return probeError("read fanotify", errno);
+        if (length == 0) break;
+        const auto total = static_cast<std::size_t>(length);
+        std::size_t offset = 0;
+        while (offset + sizeof(fanotify_event_metadata) <= total) {
+            fanotify_event_metadata event{};
+            std::memcpy(&event, data + offset, sizeof(event));
+            if (event.vers != FANOTIFY_METADATA_VERSION || event.metadata_len < sizeof(event) ||
+                event.event_len < event.metadata_len || event.event_len > total - offset) {
+                return "fanotify event format unsupported";
+            }
+            Fd eventFd(event.fd);
+            overflow |= (event.mask & FAN_Q_OVERFLOW) != 0;
+            const auto name = eventName(data + offset, event.event_len, event.metadata_len);
+            if (name == original) found |= event.mask & (FAN_CREATE | FAN_MOVED_FROM);
+            if (name == renamed) found |= event.mask & (FAN_DELETE | FAN_MOVED_TO);
+            offset += event.event_len;
+        }
+    }
+    if (overflow) return "fanotify queue overflow";
+    std::string result = "verified names:";
+    if (found & FAN_CREATE) result += " CREATE";
+    if (found & FAN_MOVED_FROM) result += " MOVED_FROM";
+    if (found & FAN_MOVED_TO) result += " MOVED_TO";
+    if (found & FAN_DELETE) result += " DELETE";
+    if (found != expected) result += " (incomplete)";
+    return result;
+}
+
+std::string inspectDirectory(const std::string& absolute, bool mark, bool exercise) {
+    if (absolute.empty() || absolute.front() != '/') return probeError("open directory", EINVAL);
+    const bool root = geteuid() == 0;
+    // Match each scanner's entry path. The ordinary UID may traverse a parent
+    // without permission to open that parent for listing.
+    const auto directory = root ? openRoot("/", std::string_view(absolute).substr(1))
+                                : openRoot(absolute, "");
+    if (directory.get() < 0) return probeError("open directory", errno);
+    struct statfs info {};
+    if (fstatfs(directory.get(), &info) != 0) return probeError("fstatfs", errno);
+    char type[24];
+    std::snprintf(type, sizeof(type), "0x%x", static_cast<unsigned>(info.f_type));
+    std::string result = std::string(filesystemName(info.f_type)) + " " + type +
+                         " · mount " + std::to_string(fdMountId(directory.get())) + " · readable";
+    if (!mark || !root) return result;
+
+    const Fd group(static_cast<int>(syscall(__NR_fanotify_init,
+        FAN_CLOEXEC | FAN_NONBLOCK | FAN_CLASS_NOTIF | FAN_REPORT_FID | FAN_REPORT_DFID_NAME,
+        O_RDONLY | O_CLOEXEC)));
+    if (group.get() < 0) return result + " · " + probeError("fanotify_init", errno);
+    constexpr std::uint64_t mask = FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO;
+    if (syscall(__NR_fanotify_mark, group.get(), FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                mask, directory.get(), nullptr) != 0) {
+        return result + " · " + probeError("FAN_MARK_FILESYSTEM", errno);
+    }
+    result += " · FAN_MARK_FILESYSTEM + DFID_NAME";
+    return exercise ? result + " · " + exerciseFanotify(group.get(), directory.get())
+                    : result + " · mark only";
 }
 
 std::uint8_t kind(mode_t mode) {
@@ -332,5 +476,21 @@ Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
         const auto exception = env->FindClass("java/lang/OutOfMemoryError");
         if (exception) env->ThrowNew(exception, "Could not allocate native scanner memory");
         return failed;
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_eltancex_rtpath_scan_NativeScanner_inspectDirectory(
+    JNIEnv* env, jobject, jbyteArray absolutePath, jboolean mark, jboolean exercise
+) {
+    try {
+        const auto absolute = bytes(env, absolutePath);
+        if (env->ExceptionCheck()) return nullptr;
+        const auto result = inspectDirectory(absolute, mark, exercise);
+        return env->NewStringUTF(result.c_str());
+    } catch (const std::bad_alloc&) {
+        const auto exception = env->FindClass("java/lang/OutOfMemoryError");
+        if (exception) env->ThrowNew(exception, "Could not allocate scanner diagnostics");
+        return nullptr;
     }
 }

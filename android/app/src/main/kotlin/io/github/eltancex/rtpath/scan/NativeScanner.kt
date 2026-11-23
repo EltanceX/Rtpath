@@ -20,4 +20,6 @@ internal object NativeScanner {
     }
 
     external fun walk(basePath: ByteArray, relativePath: ByteArray, receiver: ScanReceiver): Int
+
+    external fun inspectDirectory(absolutePath: ByteArray, mark: Boolean, exercise: Boolean): String
 }

@@ -19,6 +19,7 @@ class _SearchScreenState extends State<SearchScreen>
     with WidgetsBindingObserver {
   final _api = ScanApi();
   final _relative = TextEditingController();
+  final _absolute = TextEditingController();
   final _query = TextEditingController();
   final _scroll = ScrollController();
   final _items = <SearchEntry>[];
@@ -35,9 +36,14 @@ class _SearchScreenState extends State<SearchScreen>
   String? _error;
   String? _searchError;
   Timer? _poll;
+  Timer? _rootPoll;
   Timer? _debounce;
   int _loadRequest = 0;
   int _searchRequest = 0;
+  int _rootRequest = 0;
+  bool _rootMode = false;
+  bool _probing = false;
+  RootAccess? _root;
   bool _loading = true;
   bool _submitting = false;
   bool _configuring = true;
@@ -64,6 +70,7 @@ class _SearchScreenState extends State<SearchScreen>
       _debounce?.cancel();
       setState(_clearResults);
       unawaited(_refresh());
+      if (_rootMode) unawaited(_refreshRoot());
     }
   }
 
@@ -71,8 +78,10 @@ class _SearchScreenState extends State<SearchScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
+    _rootPoll?.cancel();
     _debounce?.cancel();
     _relative.dispose();
+    _absolute.dispose();
     _query.dispose();
     _scroll.dispose();
     super.dispose();
@@ -81,14 +90,18 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _restore() async {
     await _refresh(initial: true);
     if (!mounted) return;
+    if (_rootMode) unawaited(_refreshRoot());
     await _pollStatus();
   }
 
   Future<void> _refresh({String? preferredScope, bool initial = false}) async {
     final request = ++_loadRequest;
+    final rootMode = _rootMode;
     try {
-      final locations = await _api.locations();
-      final indexes = await _api.indexes();
+      final locations = rootMode ? <ScanLocation>[] : await _api.locations();
+      final indexes = rootMode
+          ? await _api.rootIndexes()
+          : await _api.indexes();
       if (!mounted || request != _loadRequest) return;
       final scope = preferredScope ?? _scopeId;
       setState(() {
@@ -200,14 +213,22 @@ class _SearchScreenState extends State<SearchScreen>
 
   Future<void> _start() async {
     final location = _location;
-    if (_submitting || _scanActive || location?.canScan != true) return;
+    if (_submitting || _scanActive || _probing) return;
+    final absolute = _absolute.text;
+    if (_rootMode) {
+      if (_root?.state != RootState.connected) return;
+    } else if (location?.canScan != true) {
+      return;
+    }
     FocusScope.of(context).unfocus();
     setState(() {
       _error = null;
       _submitting = true;
     });
     try {
-      final status = await _api.startScan(location!.id, _relative.text);
+      final status = _rootMode
+          ? await _api.startRootScan(absolute)
+          : await _api.startScan(location!.id, _relative.text);
       if (!mounted) return;
       setState(() => _status = status);
       _schedulePoll();
@@ -254,8 +275,10 @@ class _SearchScreenState extends State<SearchScreen>
         _schedulePoll();
       } else if (status?.published == true &&
           (previous?.taskId != status!.taskId || previous?.published != true)) {
-        setState(() => _configuring = false);
-        await _refresh(preferredScope: status.scopeId);
+        if (status.scopeId.startsWith('root:') == _rootMode) {
+          setState(() => _configuring = false);
+          await _refresh(preferredScope: status.scopeId);
+        }
       }
     } catch (error) {
       if (!mounted) return;
@@ -269,6 +292,85 @@ class _SearchScreenState extends State<SearchScreen>
       await _api.requestSharedAccess();
     } catch (error) {
       if (mounted) setState(() => _error = _message(error));
+    }
+  }
+
+  void _selectMode(bool root) {
+    if (root == _rootMode) return;
+    ++_searchRequest;
+    ++_rootRequest;
+    _debounce?.cancel();
+    _rootPoll?.cancel();
+    setState(() {
+      _rootMode = root;
+      _indexes = [];
+      _scopeId = null;
+      _error = null;
+      _loading = true;
+      _configuring = true;
+      _clearResults();
+    });
+    unawaited(_refresh());
+    if (root) unawaited(_refreshRoot());
+  }
+
+  Future<void> _refreshRoot() async {
+    final request = ++_rootRequest;
+    _rootPoll?.cancel();
+    try {
+      final access = await _api.rootAccess();
+      if (!mounted || !_rootMode || request != _rootRequest) return;
+      setState(() => _root = access);
+      if (access.state == RootState.requesting ||
+          access.state == RootState.connected) {
+        _rootPoll = Timer(const Duration(milliseconds: 650), _refreshRoot);
+      }
+    } catch (error) {
+      if (mounted && request == _rootRequest) {
+        setState(() => _error = _message(error));
+      }
+    }
+  }
+
+  Future<void> _toggleRoot() async {
+    try {
+      if (_root?.state == RootState.connected ||
+          _root?.state == RootState.requesting) {
+        await _api.disconnectRoot();
+      } else {
+        await _api.connectRoot();
+      }
+      if (mounted && _rootMode) await _refreshRoot();
+    } catch (error) {
+      if (mounted) setState(() => _error = _message(error));
+    }
+  }
+
+  Future<void> _probeRoot() async {
+    if (_probing) return;
+    setState(() => _probing = true);
+    try {
+      final report = await _api.probeRoot(_absolute.text);
+      if (!mounted || !_rootMode) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Root fanotify 探测'),
+          content: SingleChildScrollView(
+            child: SelectableText(report.join('\n\n')),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = _message(error));
+    } finally {
+      if (mounted) setState(() => _probing = false);
     }
   }
 
@@ -287,7 +389,10 @@ class _SearchScreenState extends State<SearchScreen>
   @override
   Widget build(BuildContext context) {
     final controls = [
-      if (_configuring && _locations.isNotEmpty) ...[
+      if (_rootMode) ...[
+        _rootControls(),
+        const Divider(height: 28),
+      ] else if (_configuring && _locations.isNotEmpty) ...[
         _scanControls(),
         const Divider(height: 32),
       ],
@@ -335,6 +440,19 @@ class _SearchScreenState extends State<SearchScreen>
       appBar: AppBar(
         title: const Text('RtPath'),
         actions: [
+          PopupMenuButton<bool>(
+            tooltip: '扫描模式',
+            initialValue: _rootMode,
+            onSelected: _selectMode,
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: false, child: Text('普通模式')),
+              PopupMenuItem(value: true, child: Text('Root 模式')),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Text(_rootMode ? 'Root' : '普通'),
+            ),
+          ),
           IconButton(
             tooltip: _configuring ? '收起扫描设置' : '打开扫描设置',
             onPressed: () => setState(() => _configuring = !_configuring),
@@ -546,6 +664,74 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
+  Widget _rootControls() {
+    final access = _root;
+    final connected = access?.state == RootState.connected;
+    final requesting = access?.state == RootState.requesting;
+    final canOperate = connected && !_scanActive && !_submitting && !_probing;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Wrap(
+          spacing: 12,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(switch (access?.state) {
+              RootState.connected => 'Root 已连接',
+              RootState.requesting => '正在请求 Root 授权',
+              RootState.unavailable => access?.message ?? 'Root 不可用',
+              _ => 'Root 未连接',
+            }),
+            OutlinedButton(
+              onPressed: _toggleRoot,
+              child: Text(connected || requesting ? '断开 Root' : '连接 Root'),
+            ),
+          ],
+        ),
+        if (connected && _configuring) ...[
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            title: const Text('Root 挂载视图'),
+            children: [
+              SelectableText(
+                [
+                  'UID ${access!.uid} · PID ${access.pid} · ${access.namespace}',
+                  ?access.selinux,
+                  ...access.mounts,
+                ].join('\n'),
+              ),
+            ],
+          ),
+          TextField(
+            controller: _absolute,
+            enabled: canOperate,
+            decoration: const InputDecoration(
+              labelText: '绝对目录',
+              hintText: '例如 /data/media/0/Download',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [
+              FilledButton(
+                onPressed: canOperate ? _start : null,
+                child: const Text('开始 Root 扫描'),
+              ),
+              OutlinedButton(
+                onPressed: canOperate ? _probeRoot : null,
+                child: Text(_probing ? '正在探测' : '探测 fanotify'),
+              ),
+            ],
+          ),
+        ],
+        if (!connected && _indexes.isNotEmpty) const Text('显示上次发布的 Root 索引'),
+      ],
+    );
+  }
+
   Widget _scanStatus(ScanStatus status) {
     final label = switch (status.state) {
       ScanState.running => '正在扫描',
@@ -561,7 +747,9 @@ class _SearchScreenState extends State<SearchScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (_scanActive) const LinearProgressIndicator(),
-          Text('$label · ${status.entries} 项'),
+          Text(
+            '${status.scopeId.startsWith('root:') ? 'Root · ' : ''}$label · ${status.entries} 项',
+          ),
           if (status.issues > 0) Text('${status.issues} 处读取问题'),
           if (status.skippedMounts > 0)
             Text('跳过 ${status.skippedMounts} 处其他挂载点'),

@@ -22,6 +22,12 @@ class MainActivity : FlutterActivity() {
             override fun requestSharedAccess() = scans.locations.requestSharedAccess(this@MainActivity)
             override fun indexes() = scans.indexes()
             override fun startScan(locationId: String, relativePath: String) = scans.start(locationId, relativePath)
+            override fun rootIndexes() = scans.rootIndexes()
+            override fun connectRoot() = scans.root.connect()
+            override fun disconnectRoot() = scans.root.disconnect()
+            override fun rootAccess() = scans.root.state()
+            override fun startRootScan(absolutePath: String) = scans.startRoot(absolutePath)
+            override fun probeRoot(absolutePath: String) = scans.root.probe(absolutePath)
             override fun status() = scans.status()
             override fun cancelScan(taskId: String) = scans.cancel(taskId)
             override fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?) =

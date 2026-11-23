@@ -9,6 +9,7 @@ android {
     namespace = "io.github.eltancex.rtpath"
     compileSdk = 36
     ndkVersion = "28.2.13676358"
+    buildFeatures { aidl = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -58,4 +59,5 @@ flutter {
 
 dependencies {
     implementation("androidx.sqlite:sqlite-bundled:2.6.2")
+    implementation("com.github.topjohnwu.libsu:service:6.0.0")
 }

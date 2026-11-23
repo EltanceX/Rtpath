@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:rtpath/main.dart' as app;
@@ -13,6 +14,7 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   capabilities.main();
   final api = ScanApi();
+  var restarted = false;
 
   testWidgets('scans, publishes, cancels and reopens the ordinary index', (
     tester,
@@ -24,9 +26,24 @@ void main() {
       endsWith('/io.github.eltancex.rtpath.testhost/files'),
     );
     final marker = File('${internal.path}/.rtpath-test-restart.json');
+    const run = String.fromEnvironment('RTPATH_TEST_RUN');
+    Map<String, dynamic>? saved;
     if (await marker.exists()) {
-      final saved =
-          jsonDecode(await marker.readAsString()) as Map<String, dynamic>;
+      saved = jsonDecode(await marker.readAsString()) as Map<String, dynamic>;
+      if (saved['run'] != run) {
+        final stale = Directory(saved['fixture'] as String);
+        final allowed = RegExp(
+          '^${RegExp.escape(internal.path)}/rtpath-verify-[A-Za-z0-9]+\$',
+        );
+        if (allowed.hasMatch(stale.path) && await stale.exists()) {
+          await stale.delete(recursive: true);
+        }
+        await marker.delete();
+        saved = null;
+      }
+    }
+    if (saved != null) {
+      restarted = true;
       final scope = saved['scope'] as String;
       final generation = saved['generation'] as String;
       final sharedScope = saved['sharedScope'] as String?;
@@ -215,6 +232,7 @@ void main() {
 
       await marker.writeAsString(
         jsonEncode({
+          'run': run,
           'fixture': fixture.path,
           'scope': first.scopeId,
           'generation': uiScan!.taskId,
@@ -374,6 +392,157 @@ void main() {
       await fixture.delete(recursive: true);
     }
   }, timeout: const Timeout(Duration(minutes: 3)));
+
+  const rootFixture = String.fromEnvironment('RTPATH_ROOT_FIXTURE');
+  if (rootFixture.isNotEmpty) {
+    testWidgets('explicit Root authorization, metadata pipe and disconnect', (
+      tester,
+    ) async {
+      expect(rootFixture, startsWith('/data/local/tmp/rtpath-root-'));
+      final scope = 'root:$rootFixture';
+      expect((await api.rootAccess()).state, RootState.idle);
+      expect((await api.indexes()).any((it) => it.scopeId == scope), isFalse);
+      if (restarted) {
+        final indexes = await api.rootIndexes();
+        expect(indexes.any((it) => it.scopeId == scope), isTrue);
+        expect(
+          (await api.find(scope, 'Protected-项目'))?.entries.single.path,
+          '$rootFixture/Protected-项目.txt',
+        );
+        debugPrint(
+          'RtPath phase 3: persisted Root index available without reconnecting',
+        );
+        return;
+      }
+
+      await expectLater(
+        Directory(rootFixture).list().toList(),
+        throwsA(isA<FileSystemException>()),
+      );
+      await expectLater(
+        api.startRootScan(rootFixture),
+        throwsA(isA<PlatformException>()),
+      );
+      await tester.pumpWidget(const SizedBox());
+      app.main();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('扫描模式'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Root 模式'));
+      await tester.pumpAndSettle();
+      expect((await api.rootAccess()).state, RootState.idle);
+      await tester.tap(find.text('连接 Root'));
+      await tester.pump();
+      final access = await _waitRoot(api);
+      expect(access.state, RootState.connected, reason: access.message);
+      expect(access.pid, greaterThan(0));
+      expect(access.uid, 0);
+      expect(access.namespace, startsWith('mnt:['));
+      expect(access.mounts, hasLength(4));
+      debugPrint(
+        'RtPath phase 3: UID ${access.uid}, PID ${access.pid}, ${access.namespace}, ${access.selinux}',
+      );
+      for (final mount in access.mounts) {
+        debugPrint('RtPath phase 3: $mount');
+      }
+
+      final probes = await api.probeRoot(rootFixture);
+      expect(probes, hasLength(3));
+      expect(probes.first, contains('mount '));
+      for (final probe in probes) {
+        debugPrint('RtPath phase 3: $probe');
+      }
+      await expectLater(
+        api.startRootScan('$rootFixture/../'),
+        throwsA(isA<PlatformException>()),
+      );
+      await tester.pump(const Duration(milliseconds: 700));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, '绝对目录'),
+        rootFixture,
+      );
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      final start = find.text('开始 Root 扫描');
+      await tester.ensureVisible(start);
+      await tester.tap(start);
+      await tester.pump();
+      final first = await _waitForScope(api, scope);
+      final published = await _waitFor(api, first.taskId, (it) => !_active(it));
+      expect(published.state, ScanState.completed, reason: published.message);
+      expect(published.entries, 24001);
+      expect(published.published, isTrue);
+      expect(
+        (await api.find(scope, 'Protected-项目'))?.entries.single.path,
+        '$rootFixture/Protected-项目.txt',
+      );
+      expect((await api.indexes()).any((it) => it.scopeId == scope), isFalse);
+      final rootIndex = (await api.rootIndexes()).singleWhere(
+        (it) => it.scopeId == scope,
+      );
+      expect(rootIndex.generation, first.taskId);
+      expect(rootIndex.partial, isFalse);
+
+      final cancelled = await api.startRootScan(rootFixture);
+      expect(await api.cancelScan(cancelled.taskId), isTrue);
+      expect(
+        (await _waitFor(api, cancelled.taskId, (it) => !_active(it))).state,
+        ScanState.cancelled,
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      final disconnect = find.text('断开 Root');
+      await tester.ensureVisible(disconnect);
+      await tester.pumpAndSettle();
+      final interrupted = await api.startRootScan(rootFixture);
+      await _waitFor(
+        api,
+        interrupted.taskId,
+        (it) => it.entries > 0 || !_active(it),
+      );
+      await tester.tap(disconnect);
+      await tester.pump();
+      final stopped = await _waitFor(
+        api,
+        interrupted.taskId,
+        (it) => !_active(it),
+      );
+      expect(stopped.state, ScanState.failed);
+      expect(stopped.published, isFalse);
+      expect((await api.rootAccess()).state, RootState.idle);
+      expect((await api.find(scope, 'Protected-项目'))?.generation, first.taskId);
+      await tester.pump(const Duration(milliseconds: 700));
+      await tester.pumpAndSettle();
+      expect(find.text('Root 未连接'), findsOneWidget);
+      debugPrint(
+        'RtPath phase 3: protected scope, cancellation, disconnect and index isolation verified',
+      );
+    }, timeout: const Timeout(Duration(minutes: 2)));
+  }
+}
+
+Future<RootAccess> _waitRoot(ScanApi api) async {
+  final timer = Stopwatch()..start();
+  while (timer.elapsed < const Duration(seconds: 38)) {
+    final access = await api.rootAccess();
+    if (access.state == RootState.connected ||
+        access.state == RootState.unavailable) {
+      return access;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+  }
+  fail('Timed out waiting for Root authorization');
+}
+
+Future<ScanStatus> _waitForScope(ScanApi api, String scope) async {
+  final timer = Stopwatch()..start();
+  while (timer.elapsed < const Duration(seconds: 5)) {
+    final status = await api.status();
+    if (status?.scopeId == scope) return status!;
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+  }
+  fail('Timed out waiting for the Root scan to start');
 }
 
 extension on ScanApi {

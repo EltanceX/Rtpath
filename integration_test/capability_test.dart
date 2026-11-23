@@ -39,5 +39,11 @@ void main() {
       'shared root: ${scope.error ?? 'readable'}, '
       'app external: ${report.directories[1].error ?? 'readable'}',
     );
+    debugPrint('RtPath phase 3: ordinary namespace ${report.mountNamespace}');
+    for (final directory in report.directories) {
+      debugPrint(
+        'RtPath phase 3: ordinary ${directory.path} · ${directory.mount ?? directory.error}',
+      );
+    }
   });
 }

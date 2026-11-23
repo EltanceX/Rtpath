@@ -17,6 +17,7 @@ class CapabilityReport {
       kernelRelease = data['kernelRelease'] as String,
       nativeAbi = data['nativeAbi'] as String,
       applicationUid = data['applicationUid'] as int,
+      mountNamespace = data['mountNamespace'] as String?,
       fileError = data['fileError'] as String?,
       inotifyError = data['inotifyError'] as String?,
       allFilesAccess = data['allFilesAccess'] as bool?,
@@ -36,6 +37,7 @@ class CapabilityReport {
   final String kernelRelease;
   final String nativeAbi;
   final int applicationUid;
+  final String? mountNamespace;
   final String? fileError;
   final String? inotifyError;
   final String? sqliteVersion;
@@ -48,9 +50,11 @@ class DirectoryCapability {
   DirectoryCapability.fromMap(Map<Object?, Object?> data)
     : label = data['label'] as String,
       path = data['path'] as String?,
-      error = data['error'] as String?;
+      error = data['error'] as String?,
+      mount = data['mount'] as String?;
 
   final String label;
   final String? path;
   final String? error;
+  final String? mount;
 }

@@ -209,6 +209,21 @@ enum class ScanState(val raw: Int) {
   }
 }
 
+enum class RootState(val raw: Int) {
+  IDLE(0),
+  REQUESTING(1),
+  CONNECTED(2),
+  UNAVAILABLE(3);
+
+  companion object {
+    private val pigeonValues = values()
+
+    fun ofRaw(raw: Int): RootState? {
+      return pigeonValues.getOrNull(raw)
+    }
+  }
+}
+
 enum class EntryKind(val raw: Int) {
   FILE(0),
   DIRECTORY(1),
@@ -289,6 +304,67 @@ data class ScanLocation (
   }
   override fun toString(): String {
     return "ScanLocation(id=$id, title=$title, path=$path, shared=$shared, canScan=$canScan)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
+data class RootAccess (
+  val state: RootState,
+  val mounts: List<String>,
+  val pid: Long? = null,
+  val uid: Long? = null,
+  val namespace: String? = null,
+  val selinux: String? = null,
+  val message: String? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): RootAccess {
+      val state = pigeonVar_list[0] as RootState
+      val mounts = pigeonVar_list[1] as List<String>
+      val pid = pigeonVar_list[2] as Long?
+      val uid = pigeonVar_list[3] as Long?
+      val namespace = pigeonVar_list[4] as String?
+      val selinux = pigeonVar_list[5] as String?
+      val message = pigeonVar_list[6] as String?
+      return RootAccess(state, mounts, pid, uid, namespace, selinux, message)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      state,
+      mounts,
+      pid,
+      uid,
+      namespace,
+      selinux,
+      message,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as RootAccess
+    return ScanApiPigeonUtils.deepEquals(this.state, other.state) && ScanApiPigeonUtils.deepEquals(this.mounts, other.mounts) && ScanApiPigeonUtils.deepEquals(this.pid, other.pid) && ScanApiPigeonUtils.deepEquals(this.uid, other.uid) && ScanApiPigeonUtils.deepEquals(this.namespace, other.namespace) && ScanApiPigeonUtils.deepEquals(this.selinux, other.selinux) && ScanApiPigeonUtils.deepEquals(this.message, other.message)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.state)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.mounts)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.pid)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.uid)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.namespace)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.selinux)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.message)
+    return result
+  }
+  override fun toString(): String {
+    return "RootAccess(state=$state, mounts=$mounts, pid=$pid, uid=$uid, namespace=$namespace, selinux=$selinux, message=$message)"
   }
 }
 
@@ -586,40 +662,50 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
       }
       130.toByte() -> {
         (readValue(buffer) as Long?)?.let {
-          EntryKind.ofRaw(it.toInt())
+          RootState.ofRaw(it.toInt())
         }
       }
       131.toByte() -> {
         (readValue(buffer) as Long?)?.let {
-          SearchOrder.ofRaw(it.toInt())
+          EntryKind.ofRaw(it.toInt())
         }
       }
       132.toByte() -> {
-        (readValue(buffer) as? List<Any?>)?.let {
-          ScanLocation.fromList(it)
+        (readValue(buffer) as Long?)?.let {
+          SearchOrder.ofRaw(it.toInt())
         }
       }
       133.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ScanStatus.fromList(it)
+          ScanLocation.fromList(it)
         }
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          PublishedIndex.fromList(it)
+          RootAccess.fromList(it)
         }
       }
       135.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchEntry.fromList(it)
+          ScanStatus.fromList(it)
         }
       }
       136.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchCursor.fromList(it)
+          PublishedIndex.fromList(it)
         }
       }
       137.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchEntry.fromList(it)
+        }
+      }
+      138.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchCursor.fromList(it)
+        }
+      }
+      139.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           SearchPage.fromList(it)
         }
@@ -633,36 +719,44 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
         stream.write(129)
         writeValue(stream, value.raw.toLong())
       }
-      is EntryKind -> {
+      is RootState -> {
         stream.write(130)
         writeValue(stream, value.raw.toLong())
       }
-      is SearchOrder -> {
+      is EntryKind -> {
         stream.write(131)
         writeValue(stream, value.raw.toLong())
       }
-      is ScanLocation -> {
+      is SearchOrder -> {
         stream.write(132)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is ScanStatus -> {
+      is ScanLocation -> {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is PublishedIndex -> {
+      is RootAccess -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is SearchEntry -> {
+      is ScanStatus -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is SearchCursor -> {
+      is PublishedIndex -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchEntry -> {
         stream.write(137)
+        writeValue(stream, value.toList())
+      }
+      is SearchCursor -> {
+        stream.write(138)
+        writeValue(stream, value.toList())
+      }
+      is SearchPage -> {
+        stream.write(139)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -676,6 +770,12 @@ interface ScanApi {
   fun requestSharedAccess()
   fun indexes(): List<PublishedIndex>
   fun startScan(locationId: String, relativePath: String): ScanStatus
+  fun rootIndexes(): List<PublishedIndex>
+  fun connectRoot()
+  fun disconnectRoot()
+  fun rootAccess(): RootAccess
+  fun startRootScan(absolutePath: String): ScanStatus
+  fun probeRoot(absolutePath: String): List<String>
   fun status(): ScanStatus?
   fun cancelScan(taskId: String): Boolean
   fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?): SearchPage?
@@ -745,6 +845,102 @@ interface ScanApi {
             val relativePathArg = args[1] as String
             val wrapped: List<Any?> = try {
               listOf(api.startScan(locationIdArg, relativePathArg))
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.rootIndexes$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            val wrapped: List<Any?> = try {
+              listOf(api.rootIndexes())
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.connectRoot$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            val wrapped: List<Any?> = try {
+              api.connectRoot()
+              listOf(null)
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.disconnectRoot$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            val wrapped: List<Any?> = try {
+              api.disconnectRoot()
+              listOf(null)
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.rootAccess$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            val wrapped: List<Any?> = try {
+              listOf(api.rootAccess())
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.startRootScan$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val absolutePathArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              listOf(api.startRootScan(absolutePathArg))
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.probeRoot$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val absolutePathArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              listOf(api.probeRoot(absolutePathArg))
             } catch (exception: Throwable) {
               ScanApiPigeonUtils.wrapError(exception)
             }
