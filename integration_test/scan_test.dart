@@ -477,6 +477,7 @@ void main() {
       expect(access.state, RootState.connected, reason: access.message);
       expect(access.pid, greaterThan(0));
       expect(access.uid, 0);
+      expect(access.appUserId, greaterThanOrEqualTo(0));
       expect(access.namespace, startsWith('mnt:['));
       expect(access.mounts, hasLength(4));
       debugPrint(
@@ -498,10 +499,18 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 700));
       await tester.pumpAndSettle();
-      await tester.enterText(
-        find.widgetWithText(TextField, '绝对目录'),
-        rootFixture,
+      await tester.tap(find.text('常用目录'));
+      await tester.pumpAndSettle();
+      final tempPreset = find.text('ADB 临时目录');
+      await tester.ensureVisible(tempPreset);
+      await tester.tap(tempPreset);
+      await tester.pumpAndSettle();
+      final directoryField = find.widgetWithText(TextField, '绝对目录');
+      expect(
+        tester.widget<TextField>(directoryField).controller?.text,
+        '/data/local/tmp',
       );
+      await tester.enterText(directoryField, rootFixture);
       FocusManager.instance.primaryFocus?.unfocus();
       await tester.pumpAndSettle();
       final start = find.text('开始 Root 扫描');

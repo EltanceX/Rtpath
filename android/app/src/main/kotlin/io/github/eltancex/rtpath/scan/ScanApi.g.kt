@@ -340,7 +340,8 @@ data class RootAccess (
   val uid: Long? = null,
   val namespace: String? = null,
   val selinux: String? = null,
-  val message: String? = null
+  val message: String? = null,
+  val appUserId: Long? = null
 )
  {
   companion object {
@@ -352,7 +353,8 @@ data class RootAccess (
       val namespace = pigeonVar_list[4] as String?
       val selinux = pigeonVar_list[5] as String?
       val message = pigeonVar_list[6] as String?
-      return RootAccess(state, mounts, pid, uid, namespace, selinux, message)
+      val appUserId = pigeonVar_list[7] as Long?
+      return RootAccess(state, mounts, pid, uid, namespace, selinux, message, appUserId)
     }
   }
   fun toList(): List<Any?> {
@@ -364,6 +366,7 @@ data class RootAccess (
       namespace,
       selinux,
       message,
+      appUserId,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -374,7 +377,7 @@ data class RootAccess (
       return true
     }
     val other = other as RootAccess
-    return ScanApiPigeonUtils.deepEquals(this.state, other.state) && ScanApiPigeonUtils.deepEquals(this.mounts, other.mounts) && ScanApiPigeonUtils.deepEquals(this.pid, other.pid) && ScanApiPigeonUtils.deepEquals(this.uid, other.uid) && ScanApiPigeonUtils.deepEquals(this.namespace, other.namespace) && ScanApiPigeonUtils.deepEquals(this.selinux, other.selinux) && ScanApiPigeonUtils.deepEquals(this.message, other.message)
+    return ScanApiPigeonUtils.deepEquals(this.state, other.state) && ScanApiPigeonUtils.deepEquals(this.mounts, other.mounts) && ScanApiPigeonUtils.deepEquals(this.pid, other.pid) && ScanApiPigeonUtils.deepEquals(this.uid, other.uid) && ScanApiPigeonUtils.deepEquals(this.namespace, other.namespace) && ScanApiPigeonUtils.deepEquals(this.selinux, other.selinux) && ScanApiPigeonUtils.deepEquals(this.message, other.message) && ScanApiPigeonUtils.deepEquals(this.appUserId, other.appUserId)
   }
 
   override fun hashCode(): Int {
@@ -386,10 +389,11 @@ data class RootAccess (
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.namespace)
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.selinux)
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.message)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.appUserId)
     return result
   }
   override fun toString(): String {
-    return "RootAccess(state=$state, mounts=$mounts, pid=$pid, uid=$uid, namespace=$namespace, selinux=$selinux, message=$message)"
+    return "RootAccess(state=$state, mounts=$mounts, pid=$pid, uid=$uid, namespace=$namespace, selinux=$selinux, message=$message, appUserId=$appUserId)"
   }
 }
 

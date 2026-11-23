@@ -894,10 +894,11 @@ class _SearchScreenState extends State<SearchScreen>
           TextField(
             controller: _absolute,
             enabled: canOperate,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: '绝对目录',
-              hintText: '例如 /data/media/0/Download',
-              border: OutlineInputBorder(),
+              hintText: '例如 /data/local/tmp',
+              border: const OutlineInputBorder(),
+              suffixIcon: _rootDirectoryMenu(access.appUserId, canOperate),
             ),
           ),
           const SizedBox(height: 8),
@@ -917,6 +918,64 @@ class _SearchScreenState extends State<SearchScreen>
         ],
         if (!connected && _indexes.isNotEmpty) const Text('显示上次发布的 Root 索引'),
       ],
+    );
+  }
+
+  Widget _rootDirectoryMenu(int? userId, bool enabled) {
+    final directories = [
+      if (userId != null) ...[
+        ('应用数据', userId == 0 ? '/data/data' : '/data/user/$userId'),
+        ('设备保护的应用数据', '/data/user_de/$userId'),
+        ('共享存储', '/data/media/$userId'),
+        ('下载', '/data/media/$userId/Download'),
+        ('外部应用数据', '/data/media/$userId/Android/data'),
+      ],
+      ('已安装的 APK', '/data/app'),
+      ('ADB 临时目录', '/data/local/tmp'),
+      ('Root 工具数据', '/data/adb'),
+    ];
+    return PopupMenuButton<String>(
+      enabled: enabled,
+      tooltip: '常用目录',
+      position: PopupMenuPosition.under,
+      onSelected: (path) {
+        FocusScope.of(context).unfocus();
+        _absolute.value = TextEditingValue(
+          text: path,
+          selection: TextSelection.collapsed(offset: path.length),
+        );
+      },
+      itemBuilder: (context) => [
+        for (final (label, path) in directories)
+          PopupMenuItem(
+            value: path,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label),
+                  Text(path, style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ),
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '常用目录',
+              style: enabled
+                  ? TextStyle(color: Theme.of(context).colorScheme.primary)
+                  : TextStyle(color: Theme.of(context).disabledColor),
+            ),
+            const Icon(Icons.arrow_drop_down, size: 18),
+          ],
+        ),
+      ),
     );
   }
 

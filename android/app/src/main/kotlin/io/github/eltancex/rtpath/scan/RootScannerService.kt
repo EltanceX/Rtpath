@@ -44,6 +44,7 @@ class RootScannerService : RootService() {
                 putInt("protocol", RootWire.VERSION)
                 putInt("pid", Process.myPid())
                 putInt("uid", Os.geteuid())
+                putInt("appUserId", user)
                 putString("namespace", Os.readlink("/proc/self/ns/mnt"))
                 putString("selinux", File("/proc/self/attr/current").readText().trim().trimEnd('\u0000'))
                 putStringArrayList("mounts", ArrayList(paths.map { inspectKnown(it) }))

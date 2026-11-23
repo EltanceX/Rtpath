@@ -181,6 +181,7 @@ internal class RootBackend(private val context: Context) {
                     uid = info.getInt("uid").toLong(),
                     namespace = info.getString("namespace"),
                     selinux = info.getString("selinux"),
+                    appUserId = info.getInt("appUserId", -1).takeIf { it >= 0 }?.toLong(),
                 )
             }
         } catch (failure: Exception) {

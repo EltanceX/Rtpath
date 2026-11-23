@@ -92,6 +92,7 @@ void main() {
     await layoutAt(390);
     expect(find.text('修改时间'), findsNothing);
     expect(find.textContaining('1.0 KiB · 2024-06-10'), findsOneWidget);
+    expect(find.byIcon(Icons.code), findsOneWidget);
     await tester.tap(find.byTooltip('复制路径'));
     expect(copied, path);
 
@@ -99,11 +100,108 @@ void main() {
     expect(find.text('修改时间'), findsOneWidget);
     expect(find.text('1.0 KiB'), findsOneWidget);
     expect(find.text(path), findsOneWidget);
+    expect(find.byIcon(Icons.code), findsOneWidget);
+  });
+
+  testWidgets(
+    'uses file type icons without changing directory and link icons',
+    (tester) async {
+      const cases = [
+        ('Photo.PNG', EntryKind.file, Icons.image_outlined),
+        ('Demo.mp4', EntryKind.file, Icons.video_file_outlined),
+        ('recording.flac', EntryKind.file, Icons.audio_file_outlined),
+        ('backup.tar.gz', EntryKind.file, Icons.folder_zip_outlined),
+        ('bundle.AAB', EntryKind.file, Icons.android),
+        ('report.pdf', EntryKind.file, Icons.picture_as_pdf_outlined),
+        ('results.csv', EntryKind.file, Icons.table_chart_outlined),
+        ('Dockerfile', EntryKind.file, Icons.code),
+        ('index.sqlite', EntryKind.file, Icons.storage_outlined),
+        ('libprobe.so', EntryKind.file, Icons.memory_outlined),
+        ('unknown.ext', EntryKind.file, Icons.insert_drive_file_outlined),
+        ('image.png', EntryKind.directory, Icons.folder_outlined),
+        ('script.sh', EntryKind.symlink, Icons.link),
+      ];
+      for (final (name, kind, icon) in cases) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SearchResultRow(
+                entry: SearchEntry(
+                  name: name,
+                  path: '/files/$name',
+                  kind: kind,
+                  modifiedMillis: 0,
+                ),
+                onCopy: (_) {},
+              ),
+            ),
+          ),
+        );
+        expect(find.byIcon(icon), findsOneWidget, reason: '$name ($kind)');
+      }
+    },
+  );
+
+  testWidgets('chooses a Root directory preset for the current Android user', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 740);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    var access = RootAccess(state: RootState.idle, mounts: []);
+    var submitted = false;
+    _mockScan('locations', (_) async => [<ScanLocation>[]]);
+    _mockScan('indexes', (_) async => [<PublishedIndex>[]]);
+    _mockScan('rootIndexes', (_) async => [<PublishedIndex>[]]);
+    _mockScan('status', (_) async => [null]);
+    _mockScan('rootAccess', (_) async => [access]);
+    _mockScan('connectRoot', (_) async {
+      access = RootAccess(
+        state: RootState.connected,
+        mounts: [],
+        appUserId: 10,
+      );
+      return <Object?>[];
+    });
+    _mockScan('startRootScan', (_) async {
+      submitted = true;
+      return [null];
+    });
+
+    await tester.pumpWidget(
+      const MaterialApp(home: SearchScreen(diagnostics: SizedBox())),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('扫描模式'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Root 模式'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('连接 Root'));
+    await tester.pumpAndSettle();
+
+    final field = find.widgetWithText(TextField, '绝对目录');
+    await tester.tap(find.text('常用目录'));
+    await tester.pumpAndSettle();
+    expect(find.text('/data/user/10'), findsOneWidget);
+    expect(find.text('/data/local/tmp'), findsOneWidget);
+    expect(find.text('/data/data'), findsNothing);
+    await tester.tap(find.text('下载'));
+    await tester.pumpAndSettle();
+
+    final controller = tester.widget<TextField>(field).controller!;
+    expect(controller.text, '/data/media/10/Download');
+    expect(
+      controller.selection,
+      TextSelection.collapsed(offset: controller.text.length),
+    );
+    expect(submitted, isFalse);
+    await tester.enterText(field, '/data/media/10/Download/project');
+    expect(controller.text, '/data/media/10/Download/project');
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('rebases stale pagination after scrolling stops', (tester) async {
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     const scope = 'scope';
     const generation = 'generation';
     var revision = 0;
@@ -120,21 +218,10 @@ void main() {
       sequence: revision,
     );
 
-    void mock(String method, Future<Object?> Function(Object?) reply) {
-      final channel = BasicMessageChannel<Object?>(
-        'dev.flutter.pigeon.rtpath.ScanApi.$method',
-        ScanApi.pigeonChannelCodec,
-      );
-      messenger.setMockDecodedMessageHandler<Object?>(channel, reply);
-      addTearDown(
-        () => messenger.setMockDecodedMessageHandler<Object?>(channel, null),
-      );
-    }
-
-    mock('locations', (_) async => [<ScanLocation>[]]);
-    mock('status', (_) async => [null]);
-    mock('watchStatus', (_) async => [watch()]);
-    mock(
+    _mockScan('locations', (_) async => [<ScanLocation>[]]);
+    _mockScan('status', (_) async => [null]);
+    _mockScan('watchStatus', (_) async => [watch()]);
+    _mockScan(
       'indexes',
       (_) async => [
         [
@@ -148,7 +235,7 @@ void main() {
         ],
       ],
     );
-    mock('search', (message) async {
+    _mockScan('search', (message) async {
       final cursor = (message! as List<Object?>).last as SearchCursor?;
       requests.add((revision, cursor?.revision));
       final reset = cursor != null && cursor.revision != revision;
@@ -234,4 +321,17 @@ void main() {
     expect(position.pixels, offset);
     expect(tester.widget<SearchResultRow>(current).entry.bytes, 4);
   });
+}
+
+void _mockScan(String method, Future<Object?> Function(Object?) reply) {
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  final channel = BasicMessageChannel<Object?>(
+    'dev.flutter.pigeon.rtpath.ScanApi.$method',
+    ScanApi.pigeonChannelCodec,
+  );
+  messenger.setMockDecodedMessageHandler<Object?>(channel, reply);
+  addTearDown(
+    () => messenger.setMockDecodedMessageHandler<Object?>(channel, null),
+  );
 }

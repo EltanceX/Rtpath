@@ -37,6 +37,7 @@ class RootAccess {
     this.namespace,
     this.selinux,
     this.message,
+    this.appUserId,
   });
 
   RootState state;
@@ -46,6 +47,7 @@ class RootAccess {
   String? namespace;
   String? selinux;
   String? message;
+  int? appUserId;
 }
 
 class ScanStatus {

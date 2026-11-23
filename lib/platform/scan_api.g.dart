@@ -194,6 +194,7 @@ class RootAccess {
     this.namespace,
     this.selinux,
     this.message,
+    this.appUserId,
   });
 
   RootState state;
@@ -210,8 +211,19 @@ class RootAccess {
 
   String? message;
 
+  int? appUserId;
+
   List<Object?> _toList() {
-    return <Object?>[state, mounts, pid, uid, namespace, selinux, message];
+    return <Object?>[
+      state,
+      mounts,
+      pid,
+      uid,
+      namespace,
+      selinux,
+      message,
+      appUserId,
+    ];
   }
 
   Object encode() {
@@ -228,6 +240,7 @@ class RootAccess {
       namespace: result[4] as String?,
       selinux: result[5] as String?,
       message: result[6] as String?,
+      appUserId: result[7] as int?,
     );
   }
 
@@ -246,7 +259,8 @@ class RootAccess {
         _deepEquals(uid, other.uid) &&
         _deepEquals(namespace, other.namespace) &&
         _deepEquals(selinux, other.selinux) &&
-        _deepEquals(message, other.message);
+        _deepEquals(message, other.message) &&
+        _deepEquals(appUserId, other.appUserId);
   }
 
   @override
@@ -255,7 +269,7 @@ class RootAccess {
 
   @override
   String toString() {
-    return 'RootAccess(state: $state, mounts: $mounts, pid: $pid, uid: $uid, namespace: $namespace, selinux: $selinux, message: $message)';
+    return 'RootAccess(state: $state, mounts: $mounts, pid: $pid, uid: $uid, namespace: $namespace, selinux: $selinux, message: $message, appUserId: $appUserId)';
   }
 }
 

@@ -24,7 +24,7 @@ class SearchResultRow extends StatelessWidget {
     final icon = Icon(switch (entry.kind) {
       EntryKind.directory => Icons.folder_outlined,
       EntryKind.symlink => Icons.link,
-      EntryKind.file => Icons.insert_drive_file_outlined,
+      EntryKind.file => _fileIcon(entry.name),
       EntryKind.other => Icons.description_outlined,
     }, size: 20);
     final copy = IconButton(
@@ -67,6 +67,106 @@ class SearchResultRow extends StatelessWidget {
       },
     );
   }
+}
+
+IconData _fileIcon(String name) {
+  final dot = name.lastIndexOf('.');
+  if (dot <= 0 || dot == name.length - 1) {
+    return switch (name.toLowerCase()) {
+      'dockerfile' ||
+      'makefile' ||
+      'gradlew' ||
+      '.gitignore' ||
+      '.env' => Icons.code,
+      _ => Icons.insert_drive_file_outlined,
+    };
+  }
+  return switch (name.substring(dot + 1).toLowerCase()) {
+    'jpg' ||
+    'jpeg' ||
+    'png' ||
+    'gif' ||
+    'webp' ||
+    'svg' ||
+    'bmp' ||
+    'heic' ||
+    'heif' ||
+    'avif' ||
+    'ico' ||
+    'tif' ||
+    'tiff' => Icons.image_outlined,
+    'mp4' ||
+    'mkv' ||
+    'webm' ||
+    'mov' ||
+    'avi' ||
+    'm4v' ||
+    'wmv' ||
+    '3gp' => Icons.video_file_outlined,
+    'mp3' ||
+    'wav' ||
+    'flac' ||
+    'm4a' ||
+    'aac' ||
+    'ogg' ||
+    'opus' ||
+    'amr' => Icons.audio_file_outlined,
+    'zip' ||
+    '7z' ||
+    'rar' ||
+    'tar' ||
+    'gz' ||
+    'tgz' ||
+    'bz2' ||
+    'xz' ||
+    'zst' ||
+    'jar' ||
+    'iso' => Icons.folder_zip_outlined,
+    'apk' || 'apks' || 'apkm' || 'xapk' || 'aab' || 'aar' => Icons.android,
+    'pdf' => Icons.picture_as_pdf_outlined,
+    'txt' ||
+    'md' ||
+    'log' ||
+    'doc' ||
+    'docx' ||
+    'rtf' ||
+    'odt' ||
+    'epub' => Icons.article_outlined,
+    'xls' || 'xlsx' || 'csv' || 'tsv' || 'ods' => Icons.table_chart_outlined,
+    'ppt' || 'pptx' || 'odp' => Icons.slideshow_outlined,
+    'db' || 'sqlite' || 'sqlite3' || 'db3' => Icons.storage_outlined,
+    'so' || 'dex' || 'elf' || 'bin' || 'dll' || 'exe' => Icons.memory_outlined,
+    'kt' ||
+    'kts' ||
+    'java' ||
+    'dart' ||
+    'cpp' ||
+    'cc' ||
+    'c' ||
+    'h' ||
+    'hpp' ||
+    'rs' ||
+    'go' ||
+    'py' ||
+    'js' ||
+    'ts' ||
+    'jsx' ||
+    'tsx' ||
+    'html' ||
+    'css' ||
+    'xml' ||
+    'json' ||
+    'yml' ||
+    'yaml' ||
+    'toml' ||
+    'sh' ||
+    'ps1' ||
+    'gradle' ||
+    'sql' ||
+    'ini' ||
+    'conf' => Icons.code,
+    _ => Icons.insert_drive_file_outlined,
+  };
 }
 
 class SearchResultHeader extends StatelessWidget {
