@@ -86,7 +86,21 @@ class PublishedIndex {
   bool partial;
 }
 
-enum WatchState { starting, live, limited, stopped }
+enum WatchState { starting, live, limited, stopped, recovering }
+
+class RepairReport {
+  RepairReport({
+    required this.relativePath,
+    required this.directories,
+    required this.entries,
+    required this.millis,
+  });
+
+  String relativePath;
+  int directories;
+  int entries;
+  int millis;
+}
 
 class WatchStatus {
   WatchStatus({
@@ -98,6 +112,7 @@ class WatchStatus {
     required this.failures,
     required this.sequence,
     this.message,
+    this.lastRepair,
   });
 
   String scopeId;
@@ -108,6 +123,7 @@ class WatchStatus {
   int failures;
   int sequence;
   String? message;
+  RepairReport? lastRepair;
 }
 
 enum EntryKind { file, directory, symlink, other }
@@ -200,6 +216,9 @@ abstract class ScanApi {
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   WatchStatus? watchStatus(String scopeId);
+
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  ScanStatus repair(String scopeId);
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   bool cancelScan(String taskId);

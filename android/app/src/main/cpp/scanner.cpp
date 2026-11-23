@@ -306,11 +306,16 @@ public:
         if (!path_) return;
         checkpoint_ = env_->GetMethodID(type, "onCheckpoint", "(ZZIIIJ)V");
         if (!checkpoint_) return;
+        identity_ = env_->GetMethodID(type, "onIdentity", "(JJJ)V");
+        if (!identity_) return;
+        repair_ = env_->GetMethodID(type, "onRepair", "([BJJJ)V");
+        if (!repair_) return;
         gap_ = env_->GetMethodID(type, "onGap", "(Ljava/lang/String;I)V");
         buffer_.reserve(batchSize * 96);
     }
 
-    Outcome scan(const std::string& base, const std::string& relative) {
+    Outcome scan(const std::string& base, const std::string& relative,
+                 std::uint64_t expectedMount, std::uint64_t expectedDevice, std::uint64_t expectedInode) {
         if (!gap_ || env_->ExceptionCheck()) return failed;
         if (stopping()) return cancelled;
 
@@ -324,6 +329,14 @@ public:
             issue("root mount identity", ENOTSUP);
             return failed;
         }
+        if (expectedMount != 0 && (mount_ != expectedMount || rootInfo_.st_dev != expectedDevice ||
+                                  rootInfo_.st_ino != expectedInode)) {
+            watch_.gap("inotify scope identity changed", ESTALE);
+            return watchFailed();
+        }
+        env_->CallVoidMethod(receiver_, identity_, static_cast<jlong>(mount_),
+            static_cast<jlong>(rootInfo_.st_dev), static_cast<jlong>(rootInfo_.st_ino));
+        if (env_->ExceptionCheck()) return failed;
         struct statfs filesystem {};
         fuse_ = fstatfs(root_.get(), &filesystem) == 0 &&
             static_cast<std::uint32_t>(filesystem.f_type) == fuseMagic;
@@ -352,6 +365,8 @@ public:
         if (!checkpoint(true)) return interrupted();
 
         auto verifyAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        auto retryAt = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        std::string previousRetry;
         while (!stopping()) {
             pollfd ready{watch_.fd(), POLLIN, 0};
             const int result = poll(&ready, 1, watch_.hasPending() ? 0 : 150);
@@ -375,7 +390,12 @@ public:
             }
             if (std::chrono::steady_clock::now() >= verifyAt) {
                 if (!checkRoot(base, relative)) break;
+                if (fuse_ && !checkpoint(false)) return interrupted();
                 verifyAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            }
+            if (std::chrono::steady_clock::now() >= retryAt) {
+                if (!retryWatch(previousRetry, base, relative)) return interrupted();
+                retryAt = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             }
         }
         return watch_.error() != 0 ? watchFailed() : cancelled;
@@ -392,6 +412,7 @@ private:
 
     Outcome walk(Fd start, const struct stat& info, std::string path) {
         entries_ = 0;
+        directories_ = 0;
         depthOffset_ = path.empty() ? 0 : 1 + std::count(path.begin(), path.end(), '/');
         if (start.get() < 0 || !pushDirectory(std::move(start), 1, info, std::move(path))) {
             issue("fdopendir scan directory", errno);
@@ -486,6 +507,7 @@ private:
         const bool watched = watch_.fd() >= 0 && watch_.add(path, directory.get());
         directory.release();
         stack_.push_back({std::move(stream), id, info, std::move(path), watched});
+        ++directories_;
         return true;
     }
 
@@ -535,7 +557,7 @@ private:
 
     // Resolve every component from the pinned root. A directory event can
     // outlive its pathname, so it cannot authorize following a link or mount.
-    Fd openParent(std::string_view path) {
+    Fd openParent(std::string_view path, bool repairing = false) {
         Fd parent(openat(root_.get(), ".", directoryFlags));
         if (parent.get() < 0) {
             watch_.gap("reopen inotify scope", errno);
@@ -547,7 +569,7 @@ private:
             Fd child(openat(parent.get(), name.c_str(), directoryFlags));
             if (child.get() < 0) {
                 if (disappeared(errno)) watch_.dirty(std::string(path.substr(0, slash)));
-                else watch_.gap("open inotify parent", errno);
+                else if (!repairing || errno != EACCES) watch_.gap("open inotify parent", errno);
                 return Fd();
             }
             if (fdMountId(child.get()) != mount_) {
@@ -571,6 +593,52 @@ private:
         if (!env_->ExceptionCheck()) env_->CallVoidMethod(receiver_, path_, value, static_cast<jint>(change));
         env_->DeleteLocalRef(value);
         return !env_->ExceptionCheck();
+    }
+
+    bool retryWatch(std::string& previous, const std::string& base, const std::string& relative) {
+        const auto candidate = watch_.nextFailed(previous);
+        if (!candidate || stopping()) return true;
+        const auto& path = *candidate;
+        previous = path;
+        if (path.empty()) {
+            if (!checkRoot(base, relative)) return false;
+            if (!watch_.add(path, root_.get())) return true;
+            watch_.gap("inotify scope watch restored", ENODATA);
+            return false;
+        }
+        const auto slash = path.rfind('/');
+        const auto parentPath = slash == path.npos ? std::string_view{} : std::string_view(path).substr(0, slash);
+        auto parent = openParent(parentPath, true);
+        if (parent.get() < 0) return watch_.error() == 0;
+        const auto* name = path.c_str() + (slash == path.npos ? 0 : slash + 1);
+
+        Fd directory(openat(parent.get(), name, directoryFlags));
+        if (directory.get() < 0) {
+            if (disappeared(errno)) watch_.dirty(path);
+            return watch_.error() == 0;
+        }
+        struct stat info {};
+        if (fstat(directory.get(), &info) != 0) return true;
+        if (fdMountId(directory.get()) != mount_) {
+            watch_.gap("inotify entry remounted", ESTALE);
+            return false;
+        }
+        if (!watch_.add(path, directory.get())) return true;
+
+        const auto began = std::chrono::steady_clock::now();
+        watch_.forget(path, true);
+        env_->CallVoidMethod(receiver_, startChanges_);
+        if (!emitPath(path, subtree) || walk(std::move(directory), info, path) != complete ||
+            watch_.error() != 0 || !checkRoot(base, relative)) return false;
+        const auto value = env_->NewByteArray(static_cast<jsize>(path.size()));
+        if (!value) return false;
+        env_->SetByteArrayRegion(value, 0, static_cast<jsize>(path.size()), reinterpret_cast<const jbyte*>(path.data()));
+        const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - began).count();
+        if (!env_->ExceptionCheck()) env_->CallVoidMethod(receiver_, repair_, value,
+            static_cast<jlong>(directories_), static_cast<jlong>(entries_), static_cast<jlong>(millis));
+        env_->DeleteLocalRef(value);
+        return checkpoint(false);
     }
 
     bool refresh(const std::string& path, bool metadata) {
@@ -619,7 +687,7 @@ private:
             return true;
         }
         watch_.forget(path);
-        return emitPath(path, subtree) && walk(std::move(directory), current.info, path) == complete;
+        return emitPath(path, subtree) && walk(std::move(directory), opened, path) == complete;
     }
 
     bool reconcile() {
@@ -690,12 +758,15 @@ private:
     jmethodID startChanges_ = nullptr;
     jmethodID path_ = nullptr;
     jmethodID checkpoint_ = nullptr;
+    jmethodID identity_ = nullptr;
+    jmethodID repair_ = nullptr;
     jmethodID gap_ = nullptr;
     std::vector<jbyte> buffer_;
     std::vector<Frame> stack_;
     std::size_t pending_ = 0;
     std::size_t depthOffset_ = 0;
     std::uint64_t entries_ = 0;
+    std::uint64_t directories_ = 0;
     std::uint64_t mount_ = 0;
     bool fuse_ = false;
     Fd root_;
@@ -707,14 +778,15 @@ private:
 
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
-    JNIEnv* env, jobject, jbyteArray basePath, jbyteArray relativePath, jobject receiver
+    JNIEnv* env, jobject, jbyteArray basePath, jbyteArray relativePath,
+    jlong expectedMount, jlong expectedDevice, jlong expectedInode, jobject receiver
 ) {
     try {
         const auto base = bytes(env, basePath);
         if (env->ExceptionCheck()) return failed;
         const auto relative = bytes(env, relativePath);
         if (env->ExceptionCheck()) return failed;
-        return Scanner(env, receiver).scan(base, relative);
+        return Scanner(env, receiver).scan(base, relative, expectedMount, expectedDevice, expectedInode);
     } catch (const std::bad_alloc&) {
         const auto exception = env->FindClass("java/lang/OutOfMemoryError");
         if (exception) env->ThrowNew(exception, "Could not allocate native scanner memory");

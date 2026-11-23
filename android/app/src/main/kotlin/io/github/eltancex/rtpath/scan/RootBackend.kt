@@ -106,7 +106,7 @@ internal class RootBackend(private val context: Context) {
         return report
     }
 
-    fun run(root: IRootScanner, id: String, scope: ScanScope, receiver: ScanReceiver): Int {
+    fun run(root: IRootScanner, id: String, scope: ScanScope, expected: ScopeIdentity, receiver: ScanReceiver): Int {
         val pipe = ParcelFileDescriptor.createReliablePipe()
         val active = ActiveStream(id, root, pipe[0])
         var started = false
@@ -117,7 +117,7 @@ internal class RootBackend(private val context: Context) {
                 stream = active
             }
             if (receiver.isCancelled()) return NativeScanner.CANCELLED
-            pipe[1].use { root.start(id, scope.path, it, client) }
+            pipe[1].use { root.start(id, scope.path, expected.mount, expected.device, expected.inode, it, client) }
             started = true
             if (receiver.isCancelled()) return NativeScanner.CANCELLED
             val outcome = DataInputStream(BufferedInputStream(ParcelFileDescriptor.AutoCloseInputStream(pipe[0]))).use {

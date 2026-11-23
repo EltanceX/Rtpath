@@ -10,6 +10,8 @@ import 'package:rtpath/platform/scan_api.g.dart';
 
 import 'capability_test.dart' as capabilities;
 
+part 'recovery_cases.dart';
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   capabilities.main();
@@ -65,6 +67,23 @@ void main() {
         expect(indexes.any((it) => it.scopeId == sharedScope), isFalse);
         expect(await api.find(sharedScope, '项目%'), isNull);
         debugPrint('RtPath phase 1: revoked shared index hidden from queries');
+      }
+      if (const bool.fromEnvironment('RTPATH_TEST_RECOVERY')) {
+        final offline = await File('${saved['fixture']}/After-Restart.txt')
+            .writeAsString('gap');
+        expect((await api.find(scope, 'after-restart'))?.entries, isEmpty);
+        final repair = await api.repair(scope);
+        expect(
+          (await _waitFor(api, repair.taskId, (it) => !_active(it))).published,
+          isTrue,
+        );
+        expect(
+          (await api.find(scope, 'after-restart'))?.entries.single.path,
+          offline.path,
+        );
+        debugPrint(
+          'RtPath phase 5: process restart retained historical results and explicit repair rebuilt them',
+        );
       }
       await Directory(saved['fixture'] as String).delete(recursive: true);
       await marker.delete();
@@ -939,8 +958,9 @@ void main() {
         expect(rows.map((row) => row.name), unorderedEquals(expected.keys));
         for (final row in rows) {
           expect(row.bytes, await File('${fixture.path}/${row.name}').length());
-          if (row.name != 'raw-write-modify.txt')
+          if (row.name != 'raw-write-modify.txt') {
             expect(row.bytes, expected[row.name]);
+          }
         }
         final fuseSize = rows
             .singleWhere((row) => row.name == 'raw-write-modify.txt')
@@ -954,6 +974,9 @@ void main() {
         await fixture.delete(recursive: true);
       }
     }, timeout: const Timeout(Duration(minutes: 2)));
+  }
+  if (const bool.fromEnvironment('RTPATH_TEST_RECOVERY')) {
+    _registerRecoveryTests(api, () => restarted, rootFixture);
   }
 }
 

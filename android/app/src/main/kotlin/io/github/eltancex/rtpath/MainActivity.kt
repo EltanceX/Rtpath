@@ -17,7 +17,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-class MainActivity : FlutterActivity() {
+open class MainActivity : FlutterActivity() {
     private var capabilitiesChannel: MethodChannel? = null
     private var watchListener: ((WatchStatus) -> Unit)? = null
     private var watchNotifications: CoroutineScope? = null
@@ -51,6 +51,7 @@ class MainActivity : FlutterActivity() {
             override fun probeRoot(absolutePath: String) = scans.root.probe(absolutePath)
             override fun status() = scans.status()
             override fun watchStatus(scopeId: String) = scans.watchStatus(scopeId)
+            override fun repair(scopeId: String) = scans.repair(scopeId)
             override fun cancelScan(taskId: String) = scans.cancel(taskId)
             override fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?) =
                 scans.search(scopeId, text, order, descending, cursor)

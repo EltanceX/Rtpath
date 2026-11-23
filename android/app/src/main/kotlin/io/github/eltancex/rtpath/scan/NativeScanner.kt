@@ -10,6 +10,8 @@ internal interface ScanReceiver {
     fun onPath(path: ByteArray, change: Int)
     fun onCheckpoint(baseline: Boolean, fuse: Boolean, watched: Int, failed: Int, error: Int, sequence: Long)
     fun onGap(operation: String, error: Int)
+    fun onIdentity(mount: Long, device: Long, inode: Long)
+    fun onRepair(path: ByteArray, directories: Long, entries: Long, millis: Long)
     fun isCancelled(): Boolean
 }
 
@@ -26,7 +28,16 @@ internal object NativeScanner {
         System.loadLibrary("rtpath_probe")
     }
 
-    external fun walk(basePath: ByteArray, relativePath: ByteArray, receiver: ScanReceiver): Int
+    fun run(scope: ScanScope, expected: ScopeIdentity, receiver: ScanReceiver): Int = walk(
+        scope.base.toByteArray(Charsets.UTF_8), scope.relativePath.toByteArray(Charsets.UTF_8),
+        expected.mount, expected.device, expected.inode, receiver,
+    )
+
+    private external fun walk(
+        basePath: ByteArray, relativePath: ByteArray, mount: Long, device: Long, inode: Long, receiver: ScanReceiver,
+    ): Int
 
     external fun inspectDirectory(absolutePath: ByteArray, mark: Boolean, exercise: Boolean): String
 }
+
+internal data class ScopeIdentity(val mount: Long = 0, val device: Long = 0, val inode: Long = 0)

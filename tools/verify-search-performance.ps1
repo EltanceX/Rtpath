@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Serial)
+param(
+    [Parameter(Mandatory)][string]$Serial,
+    [ValidatePattern('^[A-Za-z0-9-]+\.txt$')][string]$ReportName = 'phase2-performance.txt'
+)
 
 $ErrorActionPreference = 'Stop'
 if (-not $env:ANDROID_HOME -or -not $env:JAVA_HOME) {
@@ -13,7 +16,7 @@ $rtpathApk = Join-Path $rtpathRoot 'build/app/outputs/apk/profile/app-profile.ap
 $rtpathPackage = 'io.github.eltancex.rtpath.testhost'
 $rtpathRunner = "$rtpathPackage/io.github.eltancex.rtpath.scan.SearchBenchmark"
 $rtpathArtifacts = Join-Path $rtpathRoot '.local/artifacts'
-$rtpathReport = Join-Path $rtpathArtifacts 'phase2-performance.txt'
+$rtpathReport = Join-Path $rtpathArtifacts $ReportName
 $rtpathTarget = Join-Path $rtpathRoot 'lib/main.dart'
 
 Push-Location (Join-Path $rtpathRoot 'android')

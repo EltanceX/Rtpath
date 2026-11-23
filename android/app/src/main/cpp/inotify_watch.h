@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -24,7 +25,8 @@ public:
     bool hasPending() const { return !pending_.empty() || !moves_.empty(); }
 
     bool add(const std::string& path, int directory);
-    void forget(const std::string& path);
+    void forget(const std::string& path, bool keepDirectory = false);
+    std::optional<std::string> nextFailed(const std::string& after) const;
     void dirty(std::string path);
     bool drain();
     void gap(const char* operation, int error);

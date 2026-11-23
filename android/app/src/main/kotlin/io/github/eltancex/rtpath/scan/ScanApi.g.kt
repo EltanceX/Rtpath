@@ -237,7 +237,8 @@ enum class WatchState(val raw: Int) {
   STARTING(0),
   LIVE(1),
   LIMITED(2),
-  STOPPED(3);
+  STOPPED(3),
+  RECOVERING(4);
 
   companion object {
     private val pigeonValues = values()
@@ -511,6 +512,55 @@ data class PublishedIndex (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class RepairReport (
+  val relativePath: String,
+  val directories: Long,
+  val entries: Long,
+  val millis: Long
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): RepairReport {
+      val relativePath = pigeonVar_list[0] as String
+      val directories = pigeonVar_list[1] as Long
+      val entries = pigeonVar_list[2] as Long
+      val millis = pigeonVar_list[3] as Long
+      return RepairReport(relativePath, directories, entries, millis)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      relativePath,
+      directories,
+      entries,
+      millis,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as RepairReport
+    return ScanApiPigeonUtils.deepEquals(this.relativePath, other.relativePath) && ScanApiPigeonUtils.deepEquals(this.directories, other.directories) && ScanApiPigeonUtils.deepEquals(this.entries, other.entries) && ScanApiPigeonUtils.deepEquals(this.millis, other.millis)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.relativePath)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.directories)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.entries)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.millis)
+    return result
+  }
+  override fun toString(): String {
+    return "RepairReport(relativePath=$relativePath, directories=$directories, entries=$entries, millis=$millis)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class WatchStatus (
   val scopeId: String,
   val generation: String,
@@ -519,7 +569,8 @@ data class WatchStatus (
   val watched: Long,
   val failures: Long,
   val sequence: Long,
-  val message: String? = null
+  val message: String? = null,
+  val lastRepair: RepairReport? = null
 )
  {
   companion object {
@@ -532,7 +583,8 @@ data class WatchStatus (
       val failures = pigeonVar_list[5] as Long
       val sequence = pigeonVar_list[6] as Long
       val message = pigeonVar_list[7] as String?
-      return WatchStatus(scopeId, generation, revision, state, watched, failures, sequence, message)
+      val lastRepair = pigeonVar_list[8] as RepairReport?
+      return WatchStatus(scopeId, generation, revision, state, watched, failures, sequence, message, lastRepair)
     }
   }
   fun toList(): List<Any?> {
@@ -545,6 +597,7 @@ data class WatchStatus (
       failures,
       sequence,
       message,
+      lastRepair,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -555,7 +608,7 @@ data class WatchStatus (
       return true
     }
     val other = other as WatchStatus
-    return ScanApiPigeonUtils.deepEquals(this.scopeId, other.scopeId) && ScanApiPigeonUtils.deepEquals(this.generation, other.generation) && ScanApiPigeonUtils.deepEquals(this.revision, other.revision) && ScanApiPigeonUtils.deepEquals(this.state, other.state) && ScanApiPigeonUtils.deepEquals(this.watched, other.watched) && ScanApiPigeonUtils.deepEquals(this.failures, other.failures) && ScanApiPigeonUtils.deepEquals(this.sequence, other.sequence) && ScanApiPigeonUtils.deepEquals(this.message, other.message)
+    return ScanApiPigeonUtils.deepEquals(this.scopeId, other.scopeId) && ScanApiPigeonUtils.deepEquals(this.generation, other.generation) && ScanApiPigeonUtils.deepEquals(this.revision, other.revision) && ScanApiPigeonUtils.deepEquals(this.state, other.state) && ScanApiPigeonUtils.deepEquals(this.watched, other.watched) && ScanApiPigeonUtils.deepEquals(this.failures, other.failures) && ScanApiPigeonUtils.deepEquals(this.sequence, other.sequence) && ScanApiPigeonUtils.deepEquals(this.message, other.message) && ScanApiPigeonUtils.deepEquals(this.lastRepair, other.lastRepair)
   }
 
   override fun hashCode(): Int {
@@ -568,10 +621,11 @@ data class WatchStatus (
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.failures)
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.sequence)
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.message)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.lastRepair)
     return result
   }
   override fun toString(): String {
-    return "WatchStatus(scopeId=$scopeId, generation=$generation, revision=$revision, state=$state, watched=$watched, failures=$failures, sequence=$sequence, message=$message)"
+    return "WatchStatus(scopeId=$scopeId, generation=$generation, revision=$revision, state=$state, watched=$watched, failures=$failures, sequence=$sequence, message=$message, lastRepair=$lastRepair)"
   }
 }
 
@@ -791,20 +845,25 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
       }
       138.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          WatchStatus.fromList(it)
+          RepairReport.fromList(it)
         }
       }
       139.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchEntry.fromList(it)
+          WatchStatus.fromList(it)
         }
       }
       140.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchCursor.fromList(it)
+          SearchEntry.fromList(it)
         }
       }
       141.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchCursor.fromList(it)
+        }
+      }
+      142.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           SearchPage.fromList(it)
         }
@@ -850,20 +909,24 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is WatchStatus -> {
+      is RepairReport -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is SearchEntry -> {
+      is WatchStatus -> {
         stream.write(139)
         writeValue(stream, value.toList())
       }
-      is SearchCursor -> {
+      is SearchEntry -> {
         stream.write(140)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchCursor -> {
         stream.write(141)
+        writeValue(stream, value.toList())
+      }
+      is SearchPage -> {
+        stream.write(142)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -885,6 +948,7 @@ interface ScanApi {
   fun probeRoot(absolutePath: String): List<String>
   fun status(): ScanStatus?
   fun watchStatus(scopeId: String): WatchStatus?
+  fun repair(scopeId: String): ScanStatus
   fun cancelScan(taskId: String): Boolean
   fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?): SearchPage?
 
@@ -1081,6 +1145,23 @@ interface ScanApi {
             val scopeIdArg = args[0] as String
             val wrapped: List<Any?> = try {
               listOf(api.watchStatus(scopeIdArg))
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.repair$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val scopeIdArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              listOf(api.repair(scopeIdArg))
             } catch (exception: Throwable) {
               ScanApiPigeonUtils.wrapError(exception)
             }

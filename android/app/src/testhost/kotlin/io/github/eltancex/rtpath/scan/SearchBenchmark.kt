@@ -24,6 +24,8 @@ class SearchBenchmark : Instrumentation() {
             try {
                 verifyMigration(File(work, "legacy.sqlite"))
                 report.appendLine("Legacy v0 migration and literal fallback verified.")
+                verifyStorageFull(File(work, "recovery.sqlite"))
+                report.appendLine("RtPath phase 5: SQLite page cap triggered SQLITE_FULL; committed revision survived and retry succeeded.")
                 for (count in listOf(100_000, 1_000_000)) {
                     benchmark(File(work, "$count.sqlite"), count, report)
                 }

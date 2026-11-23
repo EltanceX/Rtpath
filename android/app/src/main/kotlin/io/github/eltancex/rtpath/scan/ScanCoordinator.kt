@@ -1,13 +1,16 @@
 package io.github.eltancex.rtpath.scan
 
 import android.content.Context
+import android.os.SystemClock
 import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import androidx.sqlite.SQLiteConnection
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 internal class ScanCoordinator private constructor(context: Context) {
     val locations = ScanLocations(context)
@@ -17,6 +20,7 @@ internal class ScanCoordinator private constructor(context: Context) {
     // Each database has one writer, including its baseline and incremental commits.
     private val ordinaryWriter = Executors.newSingleThreadExecutor()
     private val rootWriter = Executors.newSingleThreadExecutor()
+    private val retries = Executors.newSingleThreadScheduledExecutor()
 
     private val lock = Any()
     private var latest: ScanStatus? = null
@@ -24,9 +28,14 @@ internal class ScanCoordinator private constructor(context: Context) {
     private var rootSession: Session? = null
     private val listeners = CopyOnWriteArraySet<(WatchStatus) -> Unit>()
 
-    private class Session(val scope: ScanScope, val id: String, val remote: IRootScanner?) {
+    private data class Recovery(val reason: String, val started: Long, val expected: ScopeIdentity, val attempts: Int)
+
+    private class Session(val scope: ScanScope, val id: String, val remote: IRootScanner?, val recovery: Recovery?) {
         @Volatile var stopReason: String? = null
-        var watch = WatchStatus(scope.id, id, 0, WatchState.STARTING, 0, 0, 0)
+        var watch = WatchStatus(
+            scope.id, id, 0, if (recovery == null) WatchState.STARTING else WatchState.RECOVERING, 0, 0, 0,
+            recovery?.reason,
+        )
     }
 
     fun addWatchListener(listener: (WatchStatus) -> Unit) { listeners.add(listener) }
@@ -69,8 +78,31 @@ internal class ScanCoordinator private constructor(context: Context) {
         throw FlutterError("root_unavailable", error.message)
     }
 
-    private fun startScope(scope: ScanScope, remote: IRootScanner?): ScanStatus = synchronized(lock) {
-        if (latest?.state in listOf(ScanState.RUNNING, ScanState.CANCELLING)) {
+    fun repair(scopeId: String): ScanStatus {
+        val rootMode = scopeId.startsWith("root:")
+        val stored = (if (rootMode) rootStore else ordinaryStore).index(scopeId)
+            ?: throw FlutterError("index_unavailable", "没有可校验的历史索引")
+        val scope: ScanScope
+        val remote: IRootScanner?
+        if (rootMode) {
+            scope = rootScope(stored.index.path)
+            remote = try {
+                root.requireConnected()
+            } catch (failure: RootFailure) {
+                throw FlutterError("root_unavailable", failure.message)
+            }
+        } else {
+            scope = resolve(stored.locationId, stored.relativePath)
+            if (scope.path != stored.index.path) throw FlutterError("location_unavailable", "索引位置已变化")
+            remote = null
+        }
+        return startScope(scope, remote, Recovery("正在校验索引范围", SystemClock.elapsedRealtime(), ScopeIdentity(), 0))
+    }
+
+    private fun scanBusy() = latest?.state in listOf(ScanState.RUNNING, ScanState.CANCELLING)
+
+    private fun startScope(scope: ScanScope, remote: IRootScanner?, recovery: Recovery? = null): ScanStatus = synchronized(lock) {
+        if (scanBusy()) {
             throw FlutterError("scan_busy", "已有扫描任务在运行")
         }
         val generation = UUID.randomUUID().toString()
@@ -79,7 +111,7 @@ internal class ScanCoordinator private constructor(context: Context) {
         if (previous != null && previous.watch.state != WatchState.STOPPED) {
             stop(previous, "已切换到新的扫描任务")
         }
-        val next = Session(scope, generation, remote)
+        val next = Session(scope, generation, remote, recovery)
         if (remote == null) ordinarySession = next else rootSession = next
         latest = initial
         listeners.forEach { it(next.watch) }
@@ -124,6 +156,9 @@ internal class ScanCoordinator private constructor(context: Context) {
         val generation = session.id
         val remote = session.remote
         var reason: String? = null
+        var identity = ScopeIdentity()
+        var readyAt: Long? = null
+        var recovery: Recovery? = null
         try {
             val store = if (remote == null) ordinaryStore else rootStore
             store.open().use { db ->
@@ -134,6 +169,7 @@ internal class ScanCoordinator private constructor(context: Context) {
                     var published = false
                     var done = false
                     var lastSequence = 0L
+                    var repairReport: RepairReport? = null
                     fun finishBaseline() {
                         if (baselineWriter == null) return
                         count = baseline.count - 1
@@ -215,6 +251,11 @@ internal class ScanCoordinator private constructor(context: Context) {
                                         reason = "扫描未完整覆盖，重新扫描后可恢复实时更新"
                                         return
                                     }
+                                    readyAt = SystemClock.elapsedRealtime()
+                                    session.recovery?.let {
+                                        repairReport = RepairReport("", (watched + failed).toLong(), count,
+                                            SystemClock.elapsedRealtime() - it.started)
+                                    }
                                 }
                                 var revision = session.watch.revision
                                 changes?.use { delta ->
@@ -230,7 +271,7 @@ internal class ScanCoordinator private constructor(context: Context) {
                                     updateWatch(session, WatchStatus(
                                         scope.id, generation, revision,
                                         if (fuse || failed > 0) WatchState.LIMITED else WatchState.LIVE,
-                                        watched.toLong(), failed.toLong(), sequence, message,
+                                        watched.toLong(), failed.toLong(), sequence, message, repairReport,
                                     ))
                                 }
                                 lastSequence = sequence
@@ -240,25 +281,48 @@ internal class ScanCoordinator private constructor(context: Context) {
 
                         override fun onGap(operation: String, error: Int) {
                             reason = formatError(operation, error)
+                            val now = SystemClock.elapsedRealtime()
+                            val ready = readyAt
+                            // Frequent overflows get a bounded retry budget. A healthy
+                            // session earns a fresh retry after it has been live for a while.
+                            val attempts = if (ready != null && now - ready >= 30_000) 0 else session.recovery?.attempts ?: 0
+                            val canRebuild = error == OsConstants.ENOBUFS ||
+                                (error == OsConstants.ENODATA && operation == "inotify scope watch restored")
+                            if (identity.mount != 0L && canRebuild &&
+                                (published || (session.recovery?.expected?.mount ?: 0L) != 0L) &&
+                                attempts < 2) {
+                                recovery = Recovery(checkNotNull(reason), session.recovery?.started?.takeIf { attempts > 0 } ?: now,
+                                    identity, attempts + 1)
+                            }
+                        }
+
+                        override fun onIdentity(mount: Long, device: Long, inode: Long) {
+                            identity = ScopeIdentity(mount, device, inode)
+                        }
+
+                        override fun onRepair(path: ByteArray, directories: Long, entries: Long, millis: Long) {
+                            repairReport = RepairReport(path.toString(Charsets.UTF_8), directories, entries, millis)
                         }
                     }
 
                     try {
-                        val outcome = if (remote != null) root.run(remote, generation, scope, receiver)
-                        else NativeScanner.walk(
-                            scope.base.toByteArray(Charsets.UTF_8),
-                            scope.relativePath.toByteArray(Charsets.UTF_8), receiver,
-                        )
+                        val expected = session.recovery?.expected ?: ScopeIdentity()
+                        val outcome = if (remote != null) root.run(remote, generation, scope, expected, receiver)
+                        else NativeScanner.run(scope, expected, receiver)
                         if (outcome == NativeScanner.FAILED) {
                             reason = reason ?: synchronized(lock) { latest?.takeIf { it.taskId == generation }?.message }
                                 ?: "原生扫描失败"
                         }
-                    } finally {
+                    } catch (failure: Throwable) {
                         try {
                             changes?.close()
-                        } finally {
-                            discard(store, db, generation)
+                        } catch (rollback: Throwable) {
+                            failure.addSuppressed(rollback)
                         }
+                        changes = null
+                        throw failure
+                    } finally {
+                        try { changes?.close() } finally { discard(store, db, generation) }
                     }
                 }
             }
@@ -278,14 +342,39 @@ internal class ScanCoordinator private constructor(context: Context) {
                     }
                 }
                 if (session.watch.state != WatchState.STOPPED) {
+                    val next = recovery
                     updateWatch(session, session.watch.copy(
-                        state = WatchState.STOPPED,
+                        state = if (next == null) WatchState.STOPPED else WatchState.RECOVERING,
                         watched = 0,
                         message = reason ?: "实时更新已停止",
                     ))
+                    if (next != null) scheduleRecovery(session, next)
                 }
             }
         }
+    }
+
+    private fun scheduleRecovery(session: Session, recovery: Recovery) {
+        retries.schedule({
+            synchronized(lock) {
+                val current = if (session.remote == null) ordinarySession else rootSession
+                if (session !== current || session.stopReason != null) return@synchronized
+                if (scanBusy()) {
+                    scheduleRecovery(session, recovery)
+                    return@synchronized
+                }
+                try {
+                    if (session.remote == null) {
+                        check(resolve(session.scope.locationId, session.scope.relativePath) == session.scope) { "扫描位置已变更" }
+                    } else {
+                        check(root.requireConnected() === session.remote) { "Root 连接已变更" }
+                    }
+                    startScope(session.scope, session.remote, recovery)
+                } catch (failure: Exception) {
+                    updateWatch(session, session.watch.copy(state = WatchState.STOPPED, message = failure.message))
+                }
+            }
+        }, 350L * recovery.attempts, TimeUnit.MILLISECONDS)
     }
 
     private fun discard(store: IndexStore, db: SQLiteConnection, generation: String) {

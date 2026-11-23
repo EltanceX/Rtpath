@@ -14,7 +14,7 @@ internal fun rootScope(path: String): ScanScope {
 }
 
 internal object RootWire {
-    const val VERSION = 2
+    const val VERSION = 3
     private const val magic = 0x52545033
     private const val batchFrame = 1
     private const val problemFrame = 2
@@ -23,6 +23,8 @@ internal object RootWire {
     private const val pathFrame = 5
     private const val checkpointFrame = 6
     private const val gapFrame = 7
+    private const val identityFrame = 8
+    private const val repairFrame = 9
     private const val maxBatch = 512 * (35 + 255)
     private const val maxPath = 513 * 256
 
@@ -54,11 +56,36 @@ internal object RootWire {
     fun writeChanges(output: DataOutputStream) = output.writeByte(changesFrame)
 
     fun writePath(output: DataOutputStream, path: ByteArray, change: Int) {
-        require(path.size <= maxPath)
         output.writeByte(pathFrame)
         output.writeByte(change)
+        writePathBytes(output, path)
+    }
+
+    private fun writePathBytes(output: DataOutputStream, path: ByteArray) {
+        require(path.size <= maxPath)
         output.writeInt(path.size)
         output.write(path)
+    }
+
+    private fun readPathBytes(input: DataInputStream): ByteArray {
+        val size = input.readInt()
+        check(size in 0..maxPath) { "Root 变更路径长度无效" }
+        return ByteArray(size).also { input.readFully(it) }
+    }
+
+    fun writeIdentity(output: DataOutputStream, mount: Long, device: Long, inode: Long) {
+        output.writeByte(identityFrame)
+        output.writeLong(mount)
+        output.writeLong(device)
+        output.writeLong(inode)
+    }
+
+    fun writeRepair(output: DataOutputStream, path: ByteArray, directories: Long, entries: Long, millis: Long) {
+        output.writeByte(repairFrame)
+        writePathBytes(output, path)
+        output.writeLong(directories)
+        output.writeLong(entries)
+        output.writeLong(millis)
     }
 
     fun writeCheckpoint(
@@ -96,14 +123,14 @@ internal object RootWire {
                 changesFrame -> receiver.onChanges()
                 pathFrame -> {
                     val change = input.readUnsignedByte()
-                    val size = input.readInt()
-                    check(size in 0..maxPath) { "Root 变更路径长度无效" }
-                    receiver.onPath(ByteArray(size).also { input.readFully(it) }, change)
+                    receiver.onPath(readPathBytes(input), change)
                 }
                 checkpointFrame -> receiver.onCheckpoint(
                     input.readBoolean(), input.readBoolean(), input.readInt(), input.readInt(), input.readInt(), input.readLong(),
                 )
                 gapFrame -> receiver.onGap(input.readUTF(), input.readInt())
+                identityFrame -> receiver.onIdentity(input.readLong(), input.readLong(), input.readLong())
+                repairFrame -> receiver.onRepair(readPathBytes(input), input.readLong(), input.readLong(), input.readLong())
                 endFrame -> {
                     val result = input.readUnsignedByte()
                     check(result in NativeScanner.COMPLETE..NativeScanner.FAILED && input.read() == -1) {

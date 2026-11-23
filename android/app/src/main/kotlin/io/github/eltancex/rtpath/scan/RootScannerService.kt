@@ -50,7 +50,10 @@ class RootScannerService : RootService() {
             }
         }
 
-        override fun start(taskId: String, absolutePath: String, output: ParcelFileDescriptor, client: IBinder) {
+        override fun start(
+            taskId: String, absolutePath: String, mount: Long, device: Long, inode: Long,
+            output: ParcelFileDescriptor, client: IBinder,
+        ) {
             try {
                 authorize()
                 UUID.fromString(taskId)
@@ -60,7 +63,7 @@ class RootScannerService : RootService() {
                     val job = Job(taskId, client)
                     client.linkToDeath(job.death, 0)
                     running = job
-                    worker.execute { stream(job, scope, output) }
+                    worker.execute { stream(job, scope, ScopeIdentity(mount, device, inode), output) }
                 }
             } catch (failure: Throwable) {
                 output.close()
@@ -112,12 +115,12 @@ class RootScannerService : RootService() {
             scope.path.toByteArray(Charsets.UTF_8), mark, exercise,
         )
 
-    private fun stream(job: Job, scope: ScanScope, fd: ParcelFileDescriptor) {
+    private fun stream(job: Job, scope: ScanScope, expected: ScopeIdentity, fd: ParcelFileDescriptor) {
         val output = DataOutputStream(BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(fd)))
         try {
             RootWire.writeHeader(output, job.id)
-            val result = NativeScanner.walk(
-                byteArrayOf('/'.code.toByte()), scope.relativePath.toByteArray(Charsets.UTF_8),
+            val result = NativeScanner.run(
+                scope, expected,
                 object : ScanReceiver {
                     override fun isCancelled() = job.cancelled
                     override fun onBatch(batch: ByteArray) = RootWire.writeBatch(output, batch)
@@ -128,6 +131,10 @@ class RootScannerService : RootService() {
                         baseline: Boolean, fuse: Boolean, watched: Int, failed: Int, error: Int, sequence: Long,
                     ) = RootWire.writeCheckpoint(output, baseline, fuse, watched, failed, error, sequence)
                     override fun onGap(operation: String, error: Int) = RootWire.writeGap(output, operation, error)
+                    override fun onIdentity(mount: Long, device: Long, inode: Long) =
+                        RootWire.writeIdentity(output, mount, device, inode)
+                    override fun onRepair(path: ByteArray, directories: Long, entries: Long, millis: Long) =
+                        RootWire.writeRepair(output, path, directories, entries, millis)
                 },
             )
             RootWire.writeEnd(output, result)

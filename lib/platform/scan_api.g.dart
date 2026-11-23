@@ -115,7 +115,7 @@ enum ScanState { running, cancelling, completed, partial, cancelled, failed }
 
 enum RootState { idle, requesting, connected, unavailable }
 
-enum WatchState { starting, live, limited, stopped }
+enum WatchState { starting, live, limited, stopped, recovering }
 
 enum EntryKind { file, directory, symlink, other }
 
@@ -411,6 +411,65 @@ class PublishedIndex {
   }
 }
 
+class RepairReport {
+  RepairReport({
+    required this.relativePath,
+    required this.directories,
+    required this.entries,
+    required this.millis,
+  });
+
+  String relativePath;
+
+  int directories;
+
+  int entries;
+
+  int millis;
+
+  List<Object?> _toList() {
+    return <Object?>[relativePath, directories, entries, millis];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static RepairReport decode(Object result) {
+    result as List<Object?>;
+    return RepairReport(
+      relativePath: result[0]! as String,
+      directories: result[1]! as int,
+      entries: result[2]! as int,
+      millis: result[3]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! RepairReport || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(relativePath, other.relativePath) &&
+        _deepEquals(directories, other.directories) &&
+        _deepEquals(entries, other.entries) &&
+        _deepEquals(millis, other.millis);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'RepairReport(relativePath: $relativePath, directories: $directories, entries: $entries, millis: $millis)';
+  }
+}
+
 class WatchStatus {
   WatchStatus({
     required this.scopeId,
@@ -421,6 +480,7 @@ class WatchStatus {
     required this.failures,
     required this.sequence,
     this.message,
+    this.lastRepair,
   });
 
   String scopeId;
@@ -439,6 +499,8 @@ class WatchStatus {
 
   String? message;
 
+  RepairReport? lastRepair;
+
   List<Object?> _toList() {
     return <Object?>[
       scopeId,
@@ -449,6 +511,7 @@ class WatchStatus {
       failures,
       sequence,
       message,
+      lastRepair,
     ];
   }
 
@@ -467,6 +530,7 @@ class WatchStatus {
       failures: result[5]! as int,
       sequence: result[6]! as int,
       message: result[7] as String?,
+      lastRepair: result[8] as RepairReport?,
     );
   }
 
@@ -486,7 +550,8 @@ class WatchStatus {
         _deepEquals(watched, other.watched) &&
         _deepEquals(failures, other.failures) &&
         _deepEquals(sequence, other.sequence) &&
-        _deepEquals(message, other.message);
+        _deepEquals(message, other.message) &&
+        _deepEquals(lastRepair, other.lastRepair);
   }
 
   @override
@@ -495,7 +560,7 @@ class WatchStatus {
 
   @override
   String toString() {
-    return 'WatchStatus(scopeId: $scopeId, generation: $generation, revision: $revision, state: $state, watched: $watched, failures: $failures, sequence: $sequence, message: $message)';
+    return 'WatchStatus(scopeId: $scopeId, generation: $generation, revision: $revision, state: $state, watched: $watched, failures: $failures, sequence: $sequence, message: $message, lastRepair: $lastRepair)';
   }
 }
 
@@ -743,17 +808,20 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is PublishedIndex) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    } else if (value is WatchStatus) {
+    } else if (value is RepairReport) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    } else if (value is SearchEntry) {
+    } else if (value is WatchStatus) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    } else if (value is SearchCursor) {
+    } else if (value is SearchEntry) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    } else if (value is SearchPage) {
+    } else if (value is SearchCursor) {
       buffer.putUint8(141);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchPage) {
+      buffer.putUint8(142);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -787,12 +855,14 @@ class _PigeonCodec extends StandardMessageCodec {
       case 137:
         return PublishedIndex.decode(readValue(buffer)!);
       case 138:
-        return WatchStatus.decode(readValue(buffer)!);
+        return RepairReport.decode(readValue(buffer)!);
       case 139:
-        return SearchEntry.decode(readValue(buffer)!);
+        return WatchStatus.decode(readValue(buffer)!);
       case 140:
-        return SearchCursor.decode(readValue(buffer)!);
+        return SearchEntry.decode(readValue(buffer)!);
       case 141:
+        return SearchCursor.decode(readValue(buffer)!);
+      case 142:
         return SearchPage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1034,6 +1104,26 @@ class ScanApi {
       isNullValid: true,
     );
     return pigeonVar_replyValue as WatchStatus?;
+  }
+
+  Future<ScanStatus> repair(String scopeId) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.repair$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[scopeId],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ScanStatus;
   }
 
   Future<bool> cancelScan(String taskId) async {

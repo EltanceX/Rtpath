@@ -159,17 +159,27 @@ class _SearchScreenState extends State<SearchScreen>
     if (!mounted || _scopeId != status.scopeId) return;
     ++_watchRequest;
     setState(() => _watch = status);
+    if (status.state == WatchState.recovering &&
+        _status?.taskId != status.generation) {
+      _schedulePoll();
+    }
     _scheduleLiveRefresh();
   }
 
   void _scheduleLiveRefresh() {
     final status = _watch;
+    final displayed = _displayGeneration;
     if (_fetching ||
         _waitingForInput ||
         (_liveRefresh?.isActive ?? false) ||
         status == null ||
-        status.generation != _displayGeneration ||
-        status.revision <= _displayRevision) {
+        displayed == null) {
+      return;
+    }
+    if (status.generation == displayed) {
+      if (status.revision <= _displayRevision) return;
+    } else if (status.state != WatchState.live &&
+        status.state != WatchState.limited) {
       return;
     }
     _liveRefresh = Timer(const Duration(milliseconds: 60), () {
@@ -287,7 +297,7 @@ class _SearchScreenState extends State<SearchScreen>
     _debounce = Timer(const Duration(milliseconds: 200), _search);
   }
 
-  Future<void> _start() async {
+  void _start() {
     final location = _location;
     if (_submitting || _scanActive || _probing) return;
     final absolute = _absolute.text;
@@ -296,15 +306,23 @@ class _SearchScreenState extends State<SearchScreen>
     } else if (location?.canScan != true) {
       return;
     }
+    unawaited(
+      _submitScan(
+        () => _rootMode
+            ? _api.startRootScan(absolute)
+            : _api.startScan(location!.id, _relative.text),
+      ),
+    );
+  }
+
+  Future<void> _submitScan(Future<ScanStatus> Function() start) async {
     FocusScope.of(context).unfocus();
     setState(() {
       _error = null;
       _submitting = true;
     });
     try {
-      final status = _rootMode
-          ? await _api.startRootScan(absolute)
-          : await _api.startScan(location!.id, _relative.text);
+      final status = await start();
       if (!mounted) return;
       setState(() => _status = status);
       _schedulePoll();
@@ -510,6 +528,23 @@ class _SearchScreenState extends State<SearchScreen>
           },
         ),
         _watchLabel(),
+        if (_scopeId case final scope?)
+          if (_watch == null ||
+              _watch?.state == WatchState.stopped ||
+              _watch?.state == WatchState.limited)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed:
+                    _submitting ||
+                        _scanActive ||
+                        _probing ||
+                        (_rootMode && _root?.state != RootState.connected)
+                    ? null
+                    : () => _submitScan(() => _api.repair(scope)),
+                child: const Text('校验并恢复实时更新'),
+              ),
+            ),
       ] else if (!_loading && _error == null)
         const Text('扫描一个目录以建立索引。'),
     ];
@@ -594,7 +629,8 @@ class _SearchScreenState extends State<SearchScreen>
       WatchState.live => '实时更新 · ${watch!.watched} 个目录',
       WatchState.limited => '部分实时覆盖 · ${watch!.message}',
       WatchState.stopped => '实时更新已停止 · ${watch!.message ?? '可重新扫描'}',
-      null => '历史索引 · 重新扫描可恢复实时更新',
+      WatchState.recovering => '正在校验索引 · ${watch!.message ?? '保留历史结果'}',
+      null => '历史索引 · 等待校验',
     };
     return Text(label, style: Theme.of(context).textTheme.bodySmall);
   }

@@ -72,6 +72,8 @@ internal class IndexStore(private val file: File) {
 
     fun scopeVersion(db: SQLiteConnection, scopeId: String): String? = readIndex(db, scopeId)?.index?.generation
 
+    fun index(scopeId: String): StoredIndex? = open().use { readIndex(it, scopeId) }
+
     fun discardUnpublished(db: SQLiteConnection, generation: String) {
         db.prepare("""
             DELETE FROM entries WHERE generation = ?

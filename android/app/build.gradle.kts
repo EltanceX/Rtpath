@@ -25,6 +25,9 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
+        externalNativeBuild.cmake {
+            arguments += "-DRTPATH_TEST_HOST=${if (rtpathTestHost) "ON" else "OFF"}"
+        }
     }
 
     if (rtpathTestHost) {

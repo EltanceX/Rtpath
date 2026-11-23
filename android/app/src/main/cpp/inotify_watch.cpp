@@ -5,6 +5,22 @@
 #include <cstring>
 #include <sys/inotify.h>
 
+#ifdef RTPATH_TEST_HOST
+#include <jni.h>
+#include <atomic>
+
+namespace {
+std::atomic<int> testWatchCap{0};
+std::atomic<int> testPendingCap{0};
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_github_eltancex_rtpath_RecoveryTestLimits_configure(JNIEnv*, jobject, jint watches, jint pending) {
+    testWatchCap = watches;
+    testPendingCap = pending;
+}
+#endif
+
 namespace rtpath {
 namespace {
 
@@ -13,6 +29,14 @@ constexpr std::size_t maxPendingBytes = 4 * 1024 * 1024;
 constexpr std::uint32_t events = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
     IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF;
 
+std::size_t pendingLimit() {
+#ifdef RTPATH_TEST_HOST
+    const auto testLimit = testPendingCap.load();
+    if (testLimit > 0) return static_cast<std::size_t>(testLimit);
+#endif
+    return maxPending;
+}
+
 }  // namespace
 
 InotifyWatch::InotifyWatch() : fd_(inotify_init1(IN_NONBLOCK | IN_CLOEXEC)) {
@@ -20,6 +44,14 @@ InotifyWatch::InotifyWatch() : fd_(inotify_init1(IN_NONBLOCK | IN_CLOEXEC)) {
 }
 
 bool InotifyWatch::add(const std::string& path, int directory) {
+#ifdef RTPATH_TEST_HOST
+    const auto testLimit = testWatchCap.load();
+    if (testLimit > 0 && !paths_.contains(path) && paths_.size() >= static_cast<std::size_t>(testLimit)) {
+        registrationError_ = ENOSPC;
+        failed_.insert(path);
+        return false;
+    }
+#endif
     // The procfs link names the open directory, even if its pathname changes.
     char target[64];
     std::snprintf(target, sizeof(target), "/proc/self/fd/%d", directory);
@@ -50,9 +82,18 @@ void InotifyWatch::remove(int descriptor) {
     inotify_rm_watch(fd(), descriptor);
 }
 
-void InotifyWatch::forget(const std::string& path) {
+std::optional<std::string> InotifyWatch::nextFailed(const std::string& after) const {
+    auto it = failed_.upper_bound(after);
+    if (it == failed_.end()) it = failed_.begin();
+    if (it == failed_.end()) return std::nullopt;
+    return *it;
+}
+
+void InotifyWatch::forget(const std::string& path, bool keepDirectory) {
     const auto prefix = path + "/";
-    if (const auto it = paths_.find(path); it != paths_.end()) remove(it->second);
+    if (!keepDirectory) {
+        if (const auto it = paths_.find(path); it != paths_.end()) remove(it->second);
+    }
     unsigned removed = 0;
     for (auto it = paths_.lower_bound(prefix); it != paths_.end() && it->first.starts_with(prefix);) {
         const auto descriptor = (it++)->second;
@@ -78,7 +119,7 @@ void InotifyWatch::gap(const char* operation, int error) {
 void InotifyWatch::dirty(std::string path) {
     const auto [it, inserted] = pending_.insert(std::move(path));
     if (inserted) pendingBytes_ += it->size();
-    if (pending_.size() + moves_.size() > maxPending || pendingBytes_ > maxPendingBytes) {
+    if (pending_.size() + moves_.size() > pendingLimit() || pendingBytes_ > maxPendingBytes) {
         gap("inotify pending paths overflow", ENOBUFS);
     }
 }
@@ -112,7 +153,7 @@ void InotifyWatch::event(int descriptor, std::uint32_t mask, std::uint32_t cooki
         pendingBytes_ += path.size();
         const auto [_, inserted] = moves_.try_emplace(cookie, path);
         if (inserted) {
-            if (moves_.size() + pending_.size() > maxPending || pendingBytes_ > maxPendingBytes) {
+            if (moves_.size() + pending_.size() > pendingLimit() || pendingBytes_ > maxPendingBytes) {
                 gap("inotify pending moves overflow", ENOBUFS);
             }
             return;
