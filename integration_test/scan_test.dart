@@ -48,6 +48,7 @@ void main() {
       final generation = saved['generation'] as String;
       final sharedScope = saved['sharedScope'] as String?;
       expect(await api.status(), isNull);
+      expect(await api.watchStatus(scope), isNull);
       final indexes = await api.indexes();
       expect(
         indexes.singleWhere((it) => it.scopeId == scope).generation,
@@ -124,6 +125,18 @@ void main() {
 
       await File('${fixture.path}/Replacement-新.txt').writeAsString('new');
       await seed.delete();
+      await _waitForPage(
+        api,
+        first.scopeId,
+        'replacement',
+        (it) => it.entries.length == 1,
+      );
+      await _waitForPage(
+        api,
+        first.scopeId,
+        'seed',
+        (it) => it.entries.isEmpty,
+      );
       final bulk = await Directory('${fixture.path}/bulk').create();
       for (var i = 0; i < 24000; i++) {
         File('${bulk.path}/entry-$i').createSync();
@@ -137,7 +150,7 @@ void main() {
       );
       final during = await api.find(first.scopeId, 'seed');
       expect(during?.generation, first.taskId);
-      expect(during?.entries.single.path, seed.path);
+      expect(during?.entries, isEmpty);
       expect(await api.cancelScan(rescan.taskId), isTrue);
       final cancelled = await _waitFor(
         api,
@@ -146,11 +159,11 @@ void main() {
       );
       expect(cancelled.state, ScanState.cancelled);
       expect(cancelled.published, isFalse);
+      expect((await api.find(first.scopeId, 'seed'))?.entries, isEmpty);
       expect(
-        (await api.find(first.scopeId, 'seed'))?.entries.single.path,
-        seed.path,
+        (await api.find(first.scopeId, 'replacement'))?.entries.single.name,
+        'Replacement-新.txt',
       );
-      expect((await api.find(first.scopeId, 'replacement'))?.entries, isEmpty);
 
       await bulk.delete(recursive: true);
       final deep = await Directory('${fixture.path}/deep').create();
@@ -484,6 +497,29 @@ void main() {
       expect(rootIndex.generation, first.taskId);
       expect(rootIndex.partial, isFalse);
 
+      final livePath = '$rootFixture/live-protected.txt';
+      await _runRoot("printf 'first' > '$livePath'");
+      final live = await _waitForPage(
+        api,
+        scope,
+        'live-protected',
+        (it) => it.entries.singleOrNull?.bytes == 5,
+      );
+      expect(live.generation, first.taskId);
+      expect(live.revision, greaterThan(0));
+      await _runRoot("mv '$livePath' '$rootFixture/live-renamed.txt'");
+      await _waitForPage(
+        api,
+        scope,
+        'live-renamed',
+        (it) => it.entries.singleOrNull?.bytes == 5,
+      );
+      await _runRoot("rm '$rootFixture/live-renamed.txt'");
+      await _waitForPage(api, scope, 'live-', (it) => it.entries.isEmpty);
+      debugPrint(
+        'RtPath phase 4: protected Root scope updated through the metadata pipe',
+      );
+
       final cancelled = await api.startRootScan(rootFixture);
       expect(await api.cancelScan(cancelled.taskId), isTrue);
       expect(
@@ -520,6 +556,471 @@ void main() {
       );
     }, timeout: const Timeout(Duration(minutes: 2)));
   }
+
+  testWidgets('reconciles a live tree and refreshes the visible query', (
+    tester,
+  ) async {
+    if (restarted) return;
+    final location = (await api.locations()).singleWhere(
+      (it) => it.id == 'app-files',
+    );
+    final fixture = await Directory(location.path).createTemp('rtpath-live-');
+    final outside = await Directory(location.path).createTemp('rtpath-donor-');
+    try {
+      final left = await Directory('${fixture.path}/left').create();
+      final right = await Directory('${fixture.path}/right').create();
+      for (var i = 0; i < 140; ++i) {
+        File('${left.path}/cursor-$i.txt').createSync();
+      }
+      final incoming = await Directory('${outside.path}/donor/nested')
+          .create(recursive: true);
+      await File('${incoming.path}/Moved-In-文件.txt').writeAsString('moved');
+      final relative = fixture.path.substring(location.path.length + 1);
+      final seed = await File('${left.path}/Live-Target.txt')
+          .writeAsString('old');
+      final scan = await api.startScan(location.id, relative);
+      final scope = scan.scopeId;
+      expect(
+        (await _waitFor(api, scan.taskId, (it) => !_active(it))).published,
+        isTrue,
+      );
+      expect((await api.watchStatus(scope))?.state, WatchState.live);
+      expect((await api.watchStatus(scope))?.watched, 3);
+      final before = (await api.find(scope, 'prefix:cursor-'))!;
+      expect(before.next, isNotNull);
+
+      await seed.writeAsString('different size');
+      final changed = await _waitForPage(
+        api,
+        scope,
+        'live-target',
+        (it) => it.entries.singleOrNull?.bytes == 14,
+      );
+      expect(changed.generation, scan.taskId);
+      expect(changed.revision, greaterThan(before.revision));
+      expect(
+        (await api.find(scope, 'prefix:cursor-', cursor: before.next))?.reset,
+        isTrue,
+      );
+
+      final temp = await File('${left.path}/.editor-temp')
+          .writeAsString('atomic save');
+      await temp.rename(seed.path);
+      await _waitForPage(
+        api,
+        scope,
+        'live-target',
+        (it) => it.entries.singleOrNull?.bytes == 11,
+      );
+      expect((await api.find(scope, 'editor-temp'))?.entries, isEmpty);
+
+      final moved = '${right.path}/arrived';
+      await Directory('${outside.path}/donor').rename(moved);
+      await _waitForPage(
+        api,
+        scope,
+        'moved-in',
+        (it) =>
+            it.entries.singleOrNull?.path == '$moved/nested/Moved-In-文件.txt',
+      );
+      final renamed = '${left.path}/renamed';
+      await Directory(moved).rename(renamed);
+      await _waitForPage(
+        api,
+        scope,
+        'moved-in',
+        (it) =>
+            it.entries.singleOrNull?.path == '$renamed/nested/Moved-In-文件.txt',
+      );
+      expect(
+        (await api.find(scope, 'moved-in path:right/arrived'))?.entries,
+        isEmpty,
+      );
+      expect(
+        (await api.find(
+          scope,
+          'moved-in path:left/renamed',
+          order: SearchOrder.path,
+        ))?.entries,
+        hasLength(1),
+      );
+      final movedChild = await File('$renamed/nested/After-Rename.txt')
+          .create();
+      await _waitForPage(
+        api,
+        scope,
+        'after-rename',
+        (it) => it.entries.singleOrNull?.path == movedChild.path,
+      );
+      await Directory(renamed).rename('${outside.path}/exported');
+      await _waitForPage(api, scope, 'moved-in', (it) => it.entries.isEmpty);
+      expect((await api.find(scope, 'after-rename'))?.entries, isEmpty);
+      expect((await api.watchStatus(scope))?.watched, 3);
+      expect(
+        (await api.indexes()).singleWhere((it) => it.scopeId == scope).entries,
+        143,
+      );
+
+      await tester.pumpWidget(const SizedBox());
+      app.main();
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, '搜索文件名'),
+        'live-needle',
+      );
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pumpAndSettle();
+      expect(find.text('Live-Needle.txt'), findsNothing);
+      final timer = Stopwatch()..start();
+      final needle = await File('${fixture.path}/Live-Needle.txt')
+          .writeAsString('live');
+      final appeared = await _waitForPage(
+        api,
+        scope,
+        'live-needle',
+        (it) => it.entries.singleOrNull?.path == needle.path,
+      );
+      final backendMillis = timer.elapsedMilliseconds;
+      await _waitForWidget(tester, find.text('Live-Needle.txt'), present: true);
+      final visibleMillis = timer.elapsedMilliseconds;
+      await needle.delete();
+      await _waitForWidget(
+        tester,
+        find.text('Live-Needle.txt'),
+        present: false,
+      );
+      expect(appeared.generation, scan.taskId);
+      debugPrint(
+        'RtPath phase 4: ordinary live query, cursor reset, move and atomic save verified '
+        '(create: database ${backendMillis}ms, Flutter ${visibleMillis}ms)',
+      );
+    } finally {
+      await fixture.delete(recursive: true);
+      await outside.delete(recursive: true);
+    }
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  testWidgets('replays events during baseline enumeration', (tester) async {
+    if (restarted) return;
+    final location = (await api.locations()).singleWhere(
+      (it) => it.id == 'app-files',
+    );
+    final fixture = await Directory(location.path).createTemp('rtpath-replay-');
+    try {
+      final relative = fixture.path.substring(location.path.length + 1);
+      final original = await Directory('${fixture.path}/before').create();
+      for (var i = 0; i < 16000; ++i) {
+        File('${original.path}/baseline-$i').createSync();
+      }
+      final scan = await api.startScan(location.id, relative);
+      final scope = scan.scopeId;
+      final progress = await _waitFor(
+        api,
+        scan.taskId,
+        (it) => it.entries > 0 || !_active(it),
+      );
+      expect(_active(progress), isTrue);
+      final moved = await original.rename('${fixture.path}/after');
+      await File('${moved.path}/baseline-0').delete();
+      final raced = await File('${moved.path}/Raced-Final.txt')
+          .writeAsString('new');
+      final completed = await _waitFor(api, scan.taskId, (it) => !_active(it));
+      expect(completed.state, ScanState.completed, reason: completed.message);
+      expect(completed.entries, 16001);
+      expect(
+        (await api.find(scope, 'raced-final'))?.entries.single.path,
+        raced.path,
+      );
+      expect((await api.find(scope, 'name:baseline-0'))?.entries, isEmpty);
+      expect((await api.find(scope, 'path:before'))?.entries, isEmpty);
+      final indexed = (await _allPaths(
+        api,
+        scope,
+        '',
+        SearchOrder.path,
+        false,
+      )).toSet();
+      final actual = await fixture
+          .list(recursive: true, followLinks: false)
+          .map((entry) => entry.path)
+          .toSet();
+      expect(indexed, actual);
+      debugPrint(
+        'RtPath phase 4: concurrent baseline rename/create/delete reconciled against traversal',
+      );
+      final movedScope = await fixture.rename('${fixture.path}-moved');
+      try {
+        final stopped = await _waitWatch(api, scope, WatchState.stopped);
+        expect(stopped.message, contains('inotify scope'));
+        expect(
+          (await api.find(scope, 'raced-final'))?.entries.single.path,
+          raced.path,
+        );
+        debugPrint(
+          'RtPath phase 4: moved scan root stopped watching and retained the last revision',
+        );
+      } finally {
+        await movedScope.rename(fixture.path);
+      }
+    } finally {
+      await fixture.delete(recursive: true);
+    }
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  if (const bool.fromEnvironment('RTPATH_TEST_SHARED') &&
+      rootFixture.isNotEmpty) {
+    testWidgets('compares shared storage events through both Android views', (
+      tester,
+    ) async {
+      if (restarted) return;
+      final shared = (await api.locations()).singleWhere(
+        (it) => it.id == 'shared-primary',
+      );
+      expect(shared.path, '/storage/emulated/0');
+      final download = await Directory('${shared.path}/Download').create();
+      final fixture = await download.createTemp('rtpath-views-');
+      final relative = fixture.path.substring(shared.path.length + 1);
+      final raw = '/data/media/0/$relative';
+      try {
+        for (final tag in ['fuse-write', 'raw-write']) {
+          for (final item in ['modify', 'rename-old', 'delete']) {
+            await File('${fixture.path}/$tag-$item.txt').writeAsString('seed');
+          }
+        }
+        await api.connectRoot();
+        final access = await _waitRoot(api);
+        expect(access.state, RootState.connected, reason: access.message);
+        final ordinary = await api.startScan(shared.id, relative);
+        expect(
+          (await _waitFor(
+            api,
+            ordinary.taskId,
+            (it) => !_active(it),
+          )).published,
+          isTrue,
+        );
+        final root = await api.startRootScan(raw);
+        expect(
+          (await _waitFor(api, root.taskId, (it) => !_active(it))).published,
+          isTrue,
+        );
+        final scopes = [ordinary.scopeId, root.scopeId];
+        expect(
+          (await api.watchStatus(ordinary.scopeId))?.state,
+          WatchState.limited,
+        );
+        expect((await api.watchStatus(root.scopeId))?.state, WatchState.live);
+        for (final scope in scopes) {
+          final state = await api.watchStatus(scope);
+          expect(state?.watched, 1);
+          expect(state?.failures, 0);
+          expect((await api.find(scope, ''))?.entries, hasLength(6));
+        }
+
+        final fuseToFuse = <bool>[];
+        final fuseToRaw = <bool>[];
+        final rawToFuse = <bool>[];
+        final rawToRaw = <bool>[];
+        Future<void> observe(
+          String term,
+          bool Function(SearchPage) changed,
+          List<bool> fuse,
+          List<bool> raw,
+        ) async {
+          final hits = await Future.wait(
+            scopes.map((scope) => _observesChange(api, scope, term, changed)),
+          );
+          fuse.add(hits.first);
+          raw.add(hits.last);
+        }
+
+        await File('${fixture.path}/fuse-write-create.txt')
+            .writeAsString('new');
+        await observe(
+          'fuse-write-create',
+          (page) => page.entries.singleOrNull?.bytes == 3,
+          fuseToFuse,
+          fuseToRaw,
+        );
+        await File('${fixture.path}/fuse-write-modify.txt')
+            .writeAsString('changed');
+        await observe(
+          'fuse-write-modify',
+          (page) => page.entries.singleOrNull?.bytes == 7,
+          fuseToFuse,
+          fuseToRaw,
+        );
+        await File('${fixture.path}/fuse-write-rename-old.txt')
+            .rename('${fixture.path}/fuse-write-rename-new.txt');
+        await observe(
+          'fuse-write-rename',
+          (page) =>
+              page.entries.singleOrNull?.name == 'fuse-write-rename-new.txt',
+          fuseToFuse,
+          fuseToRaw,
+        );
+        await File('${fixture.path}/fuse-write-delete.txt').delete();
+        await observe(
+          'fuse-write-delete',
+          (page) => page.entries.isEmpty,
+          fuseToFuse,
+          fuseToRaw,
+        );
+
+        await _runRoot("printf 'new' > '$raw/raw-write-create.txt'");
+        await observe(
+          'raw-write-create',
+          (page) => page.entries.singleOrNull?.bytes == 3,
+          rawToFuse,
+          rawToRaw,
+        );
+        await _runRoot("printf 'changed' > '$raw/raw-write-modify.txt'");
+        await observe(
+          'raw-write-modify',
+          (page) => page.entries.singleOrNull?.bytes == 7,
+          rawToFuse,
+          rawToRaw,
+        );
+        await _runRoot(
+          "mv '$raw/raw-write-rename-old.txt' '$raw/raw-write-rename-new.txt'",
+        );
+        await observe(
+          'raw-write-rename',
+          (page) =>
+              page.entries.singleOrNull?.name == 'raw-write-rename-new.txt',
+          rawToFuse,
+          rawToRaw,
+        );
+        await _runRoot("rm '$raw/raw-write-delete.txt'");
+        await observe(
+          'raw-write-delete',
+          (page) => page.entries.isEmpty,
+          rawToFuse,
+          rawToRaw,
+        );
+
+        debugPrint(
+          'RtPath phase 4: shared create/write/rename/delete '
+          'FUSE→FUSE $fuseToFuse, FUSE→raw $fuseToRaw, raw→FUSE $rawToFuse, raw→raw $rawToRaw',
+        );
+        expect(fuseToFuse, everyElement(isTrue));
+        expect(rawToRaw, everyElement(isTrue));
+        final expected = <String, int>{
+          for (final tag in ['fuse-write', 'raw-write']) ...{
+            '$tag-create.txt': 3,
+            '$tag-modify.txt': 7,
+            '$tag-rename-new.txt': 4,
+          },
+        };
+        final rawScan = await api.startRootScan(raw);
+        expect(
+          (await _waitFor(api, rawScan.taskId, (it) => !_active(it))).published,
+          isTrue,
+        );
+        final rawRows = (await api.find(root.scopeId, ''))!.entries;
+        expect({for (final row in rawRows) row.name: row.bytes}, expected);
+        await api.disconnectRoot();
+        await _waitWatch(api, root.scopeId, WatchState.stopped);
+        expect(
+          (await api.find(
+            root.scopeId,
+            'raw-write-modify',
+          ))?.entries.single.bytes,
+          7,
+        );
+
+        final rescan = await api.startScan(shared.id, relative);
+        expect(
+          (await _waitFor(api, rescan.taskId, (it) => !_active(it))).published,
+          isTrue,
+        );
+        final rows = (await api.find(rescan.scopeId, ''))!.entries;
+        expect(rows.map((row) => row.name), unorderedEquals(expected.keys));
+        for (final row in rows) {
+          expect(row.bytes, await File('${fixture.path}/${row.name}').length());
+          if (row.name != 'raw-write-modify.txt')
+            expect(row.bytes, expected[row.name]);
+        }
+        final fuseSize = rows
+            .singleWhere((row) => row.name == 'raw-write-modify.txt')
+            .bytes;
+        debugPrint(
+          'RtPath phase 4: shared scope rescan verified, raw write size '
+          'after rescan FUSE=$fuseSize raw=${expected['raw-write-modify.txt']}',
+        );
+      } finally {
+        await api.disconnectRoot();
+        await fixture.delete(recursive: true);
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+  }
+}
+
+Future<bool> _observesChange(
+  ScanApi api,
+  String scope,
+  String text,
+  bool Function(SearchPage) changed,
+) async {
+  final timer = Stopwatch()..start();
+  while (timer.elapsed < const Duration(milliseconds: 900)) {
+    final page = await api.find(scope, text);
+    if (page != null && changed(page)) return true;
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+  }
+  return false;
+}
+
+Future<WatchStatus> _waitWatch(
+  ScanApi api,
+  String scope,
+  WatchState state,
+) async {
+  final timer = Stopwatch()..start();
+  while (timer.elapsed < const Duration(seconds: 5)) {
+    final watch = await api.watchStatus(scope);
+    if (watch?.state == state) return watch!;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+  fail('Watch for $scope did not reach $state');
+}
+
+Future<void> _runRoot(String command) async {
+  final result = await Process.run('su', ['-c', command]);
+  expect(result.exitCode, 0, reason: '${result.stderr}');
+}
+
+Future<SearchPage> _waitForPage(
+  ScanApi api,
+  String scope,
+  String text,
+  bool Function(SearchPage) ready,
+) async {
+  final timer = Stopwatch()..start();
+  while (timer.elapsed < const Duration(seconds: 8)) {
+    final page = await api.find(scope, text);
+    if (page != null && ready(page)) return page;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+  final watch = await api.watchStatus(scope);
+  fail(
+    'No live result for "$text": ${watch?.state} ${watch?.message} (seq=${watch?.sequence})',
+  );
+}
+
+Future<void> _waitForWidget(
+  WidgetTester tester,
+  Finder finder, {
+  required bool present,
+}) async {
+  final timer = Stopwatch()..start();
+  while (timer.elapsed < const Duration(seconds: 5)) {
+    await tester.pump();
+    if (finder.evaluate().isNotEmpty == present) return;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+  fail('Visible results did not update for $finder');
 }
 
 Future<RootAccess> _waitRoot(ScanApi api) async {

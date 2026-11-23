@@ -14,12 +14,17 @@ internal fun rootScope(path: String): ScanScope {
 }
 
 internal object RootWire {
-    const val VERSION = 1
+    const val VERSION = 2
     private const val magic = 0x52545033
     private const val batchFrame = 1
     private const val problemFrame = 2
     private const val endFrame = 3
+    private const val changesFrame = 4
+    private const val pathFrame = 5
+    private const val checkpointFrame = 6
+    private const val gapFrame = 7
     private const val maxBatch = 512 * (35 + 255)
+    private const val maxPath = 513 * 256
 
     fun writeHeader(output: DataOutputStream, id: String) {
         output.writeInt(magic)
@@ -46,6 +51,36 @@ internal object RootWire {
         output.flush()
     }
 
+    fun writeChanges(output: DataOutputStream) = output.writeByte(changesFrame)
+
+    fun writePath(output: DataOutputStream, path: ByteArray, change: Int) {
+        require(path.size <= maxPath)
+        output.writeByte(pathFrame)
+        output.writeByte(change)
+        output.writeInt(path.size)
+        output.write(path)
+    }
+
+    fun writeCheckpoint(
+        output: DataOutputStream, baseline: Boolean, fuse: Boolean, watched: Int, failed: Int, error: Int, sequence: Long,
+    ) {
+        output.writeByte(checkpointFrame)
+        output.writeBoolean(baseline)
+        output.writeBoolean(fuse)
+        output.writeInt(watched)
+        output.writeInt(failed)
+        output.writeInt(error)
+        output.writeLong(sequence)
+        output.flush()
+    }
+
+    fun writeGap(output: DataOutputStream, operation: String, error: Int) {
+        output.writeByte(gapFrame)
+        output.writeUTF(operation)
+        output.writeInt(error)
+        output.flush()
+    }
+
     fun read(input: DataInputStream, id: String, receiver: ScanReceiver): Int {
         check(input.readInt() == magic && input.readInt() == VERSION && input.readUTF() == id) {
             "Root 扫描数据与当前任务不匹配"
@@ -58,6 +93,17 @@ internal object RootWire {
                     receiver.onBatch(ByteArray(size).also { input.readFully(it) })
                 }
                 problemFrame -> receiver.onProblem(input.readUTF(), input.readInt())
+                changesFrame -> receiver.onChanges()
+                pathFrame -> {
+                    val change = input.readUnsignedByte()
+                    val size = input.readInt()
+                    check(size in 0..maxPath) { "Root 变更路径长度无效" }
+                    receiver.onPath(ByteArray(size).also { input.readFully(it) }, change)
+                }
+                checkpointFrame -> receiver.onCheckpoint(
+                    input.readBoolean(), input.readBoolean(), input.readInt(), input.readInt(), input.readInt(), input.readLong(),
+                )
+                gapFrame -> receiver.onGap(input.readUTF(), input.readInt())
                 endFrame -> {
                     val result = input.readUnsignedByte()
                     check(result in NativeScanner.COMPLETE..NativeScanner.FAILED && input.read() == -1) {

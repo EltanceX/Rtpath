@@ -13,7 +13,16 @@ import io.flutter.plugin.common.StandardMethodCodec
 import io.flutter.plugin.common.StandardMessageCodec
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 private object ScanApiPigeonUtils {
+
+  fun createConnectionError(channelName: String): FlutterError {
+    return FlutterError("channel-error",  "Unable to establish connection on channel: '$channelName'.", "")  }
 
   fun wrapResult(result: Any?): List<Any?> {
     return listOf(result)
@@ -219,6 +228,21 @@ enum class RootState(val raw: Int) {
     private val pigeonValues = values()
 
     fun ofRaw(raw: Int): RootState? {
+      return pigeonValues.getOrNull(raw)
+    }
+  }
+}
+
+enum class WatchState(val raw: Int) {
+  STARTING(0),
+  LIVE(1),
+  LIMITED(2),
+  STOPPED(3);
+
+  companion object {
+    private val pigeonValues = values()
+
+    fun ofRaw(raw: Int): WatchState? {
       return pigeonValues.getOrNull(raw)
     }
   }
@@ -487,6 +511,71 @@ data class PublishedIndex (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class WatchStatus (
+  val scopeId: String,
+  val generation: String,
+  val revision: Long,
+  val state: WatchState,
+  val watched: Long,
+  val failures: Long,
+  val sequence: Long,
+  val message: String? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): WatchStatus {
+      val scopeId = pigeonVar_list[0] as String
+      val generation = pigeonVar_list[1] as String
+      val revision = pigeonVar_list[2] as Long
+      val state = pigeonVar_list[3] as WatchState
+      val watched = pigeonVar_list[4] as Long
+      val failures = pigeonVar_list[5] as Long
+      val sequence = pigeonVar_list[6] as Long
+      val message = pigeonVar_list[7] as String?
+      return WatchStatus(scopeId, generation, revision, state, watched, failures, sequence, message)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      scopeId,
+      generation,
+      revision,
+      state,
+      watched,
+      failures,
+      sequence,
+      message,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as WatchStatus
+    return ScanApiPigeonUtils.deepEquals(this.scopeId, other.scopeId) && ScanApiPigeonUtils.deepEquals(this.generation, other.generation) && ScanApiPigeonUtils.deepEquals(this.revision, other.revision) && ScanApiPigeonUtils.deepEquals(this.state, other.state) && ScanApiPigeonUtils.deepEquals(this.watched, other.watched) && ScanApiPigeonUtils.deepEquals(this.failures, other.failures) && ScanApiPigeonUtils.deepEquals(this.sequence, other.sequence) && ScanApiPigeonUtils.deepEquals(this.message, other.message)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.scopeId)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.generation)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.revision)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.state)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.watched)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.failures)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.sequence)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.message)
+    return result
+  }
+  override fun toString(): String {
+    return "WatchStatus(scopeId=$scopeId, generation=$generation, revision=$revision, state=$state, watched=$watched, failures=$failures, sequence=$sequence, message=$message)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class SearchEntry (
   val name: String,
   val path: String,
@@ -667,45 +756,55 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
       }
       131.toByte() -> {
         (readValue(buffer) as Long?)?.let {
-          EntryKind.ofRaw(it.toInt())
+          WatchState.ofRaw(it.toInt())
         }
       }
       132.toByte() -> {
         (readValue(buffer) as Long?)?.let {
-          SearchOrder.ofRaw(it.toInt())
+          EntryKind.ofRaw(it.toInt())
         }
       }
       133.toByte() -> {
-        (readValue(buffer) as? List<Any?>)?.let {
-          ScanLocation.fromList(it)
+        (readValue(buffer) as Long?)?.let {
+          SearchOrder.ofRaw(it.toInt())
         }
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          RootAccess.fromList(it)
+          ScanLocation.fromList(it)
         }
       }
       135.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ScanStatus.fromList(it)
+          RootAccess.fromList(it)
         }
       }
       136.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          PublishedIndex.fromList(it)
+          ScanStatus.fromList(it)
         }
       }
       137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchEntry.fromList(it)
+          PublishedIndex.fromList(it)
         }
       }
       138.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchCursor.fromList(it)
+          WatchStatus.fromList(it)
         }
       }
       139.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchEntry.fromList(it)
+        }
+      }
+      140.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchCursor.fromList(it)
+        }
+      }
+      141.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           SearchPage.fromList(it)
         }
@@ -723,40 +822,48 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
         stream.write(130)
         writeValue(stream, value.raw.toLong())
       }
-      is EntryKind -> {
+      is WatchState -> {
         stream.write(131)
         writeValue(stream, value.raw.toLong())
       }
-      is SearchOrder -> {
+      is EntryKind -> {
         stream.write(132)
         writeValue(stream, value.raw.toLong())
       }
-      is ScanLocation -> {
+      is SearchOrder -> {
         stream.write(133)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is RootAccess -> {
+      is ScanLocation -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is ScanStatus -> {
+      is RootAccess -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is PublishedIndex -> {
+      is ScanStatus -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is SearchEntry -> {
+      is PublishedIndex -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is SearchCursor -> {
+      is WatchStatus -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchEntry -> {
         stream.write(139)
+        writeValue(stream, value.toList())
+      }
+      is SearchCursor -> {
+        stream.write(140)
+        writeValue(stream, value.toList())
+      }
+      is SearchPage -> {
+        stream.write(141)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -777,6 +884,7 @@ interface ScanApi {
   fun startRootScan(absolutePath: String): ScanStatus
   fun probeRoot(absolutePath: String): List<String>
   fun status(): ScanStatus?
+  fun watchStatus(scopeId: String): WatchStatus?
   fun cancelScan(taskId: String): Boolean
   fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?): SearchPage?
 
@@ -966,6 +1074,23 @@ interface ScanApi {
         }
       }
       run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.watchStatus$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val scopeIdArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              listOf(api.watchStatus(scopeIdArg))
+            } catch (exception: Throwable) {
+              ScanApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
         val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.rtpath.ScanApi.cancelScan$separatedMessageChannelSuffix", codec, taskQueue)
         if (api != null) {
           channel.setMessageHandler { message, reply ->
@@ -1001,6 +1126,34 @@ interface ScanApi {
           }
         } else {
           channel.setMessageHandler(null)
+        }
+      }
+    }
+  }
+}
+/** Generated class from Pigeon that represents Flutter messages that can be called from Kotlin. */
+class IndexUpdates(private val binaryMessenger: BinaryMessenger, private val messageChannelSuffix: String = "") {
+  companion object {
+    /** The codec used by IndexUpdates. */
+    val codec: MessageCodec<Any?> by lazy {
+      ScanApiPigeonCodec()
+    }
+  }
+  suspend fun changed(statusArg: WatchStatus)
+{
+    val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
+    return suspendCancellableCoroutine { continuation ->
+      val channelName = "dev.flutter.pigeon.rtpath.IndexUpdates.changed$separatedMessageChannelSuffix"
+      val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
+      channel.send(listOf(statusArg)) {
+        if (it is List<*>) {
+          if (it.size > 1) {
+            continuation.resumeWithException(FlutterError(it[0] as String, it[1] as String, it[2] as String?))
+          } else {
+            continuation.resume(Unit)
+          }
+        } else {
+          continuation.resumeWithException(ScanApiPigeonUtils.createConnectionError(channelName))
         }
       }
     }

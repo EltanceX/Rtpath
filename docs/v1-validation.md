@@ -1,6 +1,6 @@
 # RtPath 首版验证
 
-本文是首版验收计划。已完成的普通扫描、持久化和搜索验证见阶段报告。首版验收还包括 Root 搜索、真实文件变更后的增量更新，以及事件缺口后可恢复。fanotify 能力按设备和文件系统记录。[阶段 1 验证](phase1-baseline.md) · [阶段 2 验证](phase2-search.md)
+本文是首版验收计划。阶段报告记录了普通扫描、持久化、搜索、Root 和文件变更后的增量更新。事件缺口恢复与多设备覆盖仍需验收。fanotify 能力按设备和文件系统记录。[阶段 1 验证](phase1-baseline.md) · [阶段 2 验证](phase2-search.md) · [阶段 3 Root 验证](phase3-root.md) · [阶段 4 inotify 验证](phase4-inotify.md)
 
 ## 验证环境
 

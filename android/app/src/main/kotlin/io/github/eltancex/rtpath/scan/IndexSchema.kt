@@ -3,7 +3,7 @@ package io.github.eltancex.rtpath.scan
 import androidx.sqlite.SQLiteConnection
 
 internal object IndexSchema {
-    private const val version = 3L
+    private const val version = 4L
 
     fun initialize(db: SQLiteConnection): Boolean {
         db.execute("PRAGMA journal_mode = WAL")
@@ -18,8 +18,9 @@ internal object IndexSchema {
                 db.execute("ALTER TABLE entries ADD COLUMN size_key INTEGER AS (coalesce(bytes, -1)) VIRTUAL")
                 db.execute("DROP INDEX IF EXISTS entries_size")
                 db.execute("CREATE INDEX entries_size ON entries(generation, size_key, id)")
-                db.execute("PRAGMA user_version = $version")
             }
+            if (previousVersion < 4) db.execute("CREATE INDEX entries_children ON entries(generation, parent_id, raw_name)")
+            if (previousVersion < version) db.execute("PRAGMA user_version = $version")
             val trigram = ensureTrigram(db)
 
             // A process can stop before the active pointer changes or just after it changes.
@@ -121,14 +122,21 @@ internal object IndexSchema {
         }
 }
 
-internal class IndexedEntryWriter(db: SQLiteConnection, private val generation: String) : AutoCloseable {
+internal class IndexedEntryWriter(
+    db: SQLiteConnection,
+    private val generation: String,
+    parentId: Long = 0,
+    parentPath: String = "",
+) : AutoCloseable {
     private val insert = db.prepare("""
         INSERT INTO entries(generation, id, parent_id, raw_name, name, name_key, kind, bytes, modified_ms, relative_path, extension)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
     private data class Directory(val id: Long, val path: String)
 
-    private val directories = ArrayDeque<Directory>()
+    private val directories = ArrayDeque<Directory>().apply {
+        if (parentId != 0L) addLast(Directory(parentId, parentPath))
+    }
 
     fun insert(
         id: Long,
@@ -140,7 +148,7 @@ internal class IndexedEntryWriter(db: SQLiteConnection, private val generation: 
         name: String = rawName.toString(Charsets.UTF_8),
         nameKey: String = searchKey(name),
     ) {
-        val path = if (id == 1L) {
+        val path = if (parentId == 0L) {
             ""
         } else {
             while (directories.lastOrNull()?.id != parentId && directories.isNotEmpty()) directories.removeLast()

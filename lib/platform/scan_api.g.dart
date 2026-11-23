@@ -34,6 +34,20 @@ Object? _extractReplyValueOrThrow(
   return replyList.firstOrNull;
 }
 
+List<Object?> wrapResponse({
+  Object? result,
+  PlatformException? error,
+  bool empty = false,
+}) {
+  if (empty) {
+    return <Object?>[];
+  }
+  if (error == null) {
+    return <Object?>[result];
+  }
+  return <Object?>[error.code, error.message, error.details];
+}
+
 bool _deepEquals(Object? a, Object? b) {
   if (identical(a, b)) {
     return true;
@@ -100,6 +114,8 @@ int _deepHash(Object? value) {
 enum ScanState { running, cancelling, completed, partial, cancelled, failed }
 
 enum RootState { idle, requesting, connected, unavailable }
+
+enum WatchState { starting, live, limited, stopped }
 
 enum EntryKind { file, directory, symlink, other }
 
@@ -395,6 +411,94 @@ class PublishedIndex {
   }
 }
 
+class WatchStatus {
+  WatchStatus({
+    required this.scopeId,
+    required this.generation,
+    required this.revision,
+    required this.state,
+    required this.watched,
+    required this.failures,
+    required this.sequence,
+    this.message,
+  });
+
+  String scopeId;
+
+  String generation;
+
+  int revision;
+
+  WatchState state;
+
+  int watched;
+
+  int failures;
+
+  int sequence;
+
+  String? message;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      scopeId,
+      generation,
+      revision,
+      state,
+      watched,
+      failures,
+      sequence,
+      message,
+    ];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static WatchStatus decode(Object result) {
+    result as List<Object?>;
+    return WatchStatus(
+      scopeId: result[0]! as String,
+      generation: result[1]! as String,
+      revision: result[2]! as int,
+      state: result[3]! as WatchState,
+      watched: result[4]! as int,
+      failures: result[5]! as int,
+      sequence: result[6]! as int,
+      message: result[7] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! WatchStatus || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(scopeId, other.scopeId) &&
+        _deepEquals(generation, other.generation) &&
+        _deepEquals(revision, other.revision) &&
+        _deepEquals(state, other.state) &&
+        _deepEquals(watched, other.watched) &&
+        _deepEquals(failures, other.failures) &&
+        _deepEquals(sequence, other.sequence) &&
+        _deepEquals(message, other.message);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'WatchStatus(scopeId: $scopeId, generation: $generation, revision: $revision, state: $state, watched: $watched, failures: $failures, sequence: $sequence, message: $message)';
+  }
+}
+
 class SearchEntry {
   SearchEntry({
     required this.name,
@@ -618,32 +722,38 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is RootState) {
       buffer.putUint8(130);
       writeValue(buffer, value.index);
-    } else if (value is EntryKind) {
+    } else if (value is WatchState) {
       buffer.putUint8(131);
       writeValue(buffer, value.index);
-    } else if (value is SearchOrder) {
+    } else if (value is EntryKind) {
       buffer.putUint8(132);
       writeValue(buffer, value.index);
-    } else if (value is ScanLocation) {
+    } else if (value is SearchOrder) {
       buffer.putUint8(133);
-      writeValue(buffer, value.encode());
-    } else if (value is RootAccess) {
+      writeValue(buffer, value.index);
+    } else if (value is ScanLocation) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    } else if (value is ScanStatus) {
+    } else if (value is RootAccess) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    } else if (value is PublishedIndex) {
+    } else if (value is ScanStatus) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    } else if (value is SearchEntry) {
+    } else if (value is PublishedIndex) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    } else if (value is SearchCursor) {
+    } else if (value is WatchStatus) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    } else if (value is SearchPage) {
+    } else if (value is SearchEntry) {
       buffer.putUint8(139);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchCursor) {
+      buffer.putUint8(140);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchPage) {
+      buffer.putUint8(141);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -661,23 +771,28 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : RootState.values[value];
       case 131:
         final value = readValue(buffer) as int?;
-        return value == null ? null : EntryKind.values[value];
+        return value == null ? null : WatchState.values[value];
       case 132:
         final value = readValue(buffer) as int?;
-        return value == null ? null : SearchOrder.values[value];
+        return value == null ? null : EntryKind.values[value];
       case 133:
-        return ScanLocation.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : SearchOrder.values[value];
       case 134:
-        return RootAccess.decode(readValue(buffer)!);
+        return ScanLocation.decode(readValue(buffer)!);
       case 135:
-        return ScanStatus.decode(readValue(buffer)!);
+        return RootAccess.decode(readValue(buffer)!);
       case 136:
-        return PublishedIndex.decode(readValue(buffer)!);
+        return ScanStatus.decode(readValue(buffer)!);
       case 137:
-        return SearchEntry.decode(readValue(buffer)!);
+        return PublishedIndex.decode(readValue(buffer)!);
       case 138:
-        return SearchCursor.decode(readValue(buffer)!);
+        return WatchStatus.decode(readValue(buffer)!);
       case 139:
+        return SearchEntry.decode(readValue(buffer)!);
+      case 140:
+        return SearchCursor.decode(readValue(buffer)!);
+      case 141:
         return SearchPage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -901,6 +1016,26 @@ class ScanApi {
     return pigeonVar_replyValue as ScanStatus?;
   }
 
+  Future<WatchStatus?> watchStatus(String scopeId) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.rtpath.ScanApi.watchStatus$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[scopeId],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
+    return pigeonVar_replyValue as WatchStatus?;
+  }
+
   Future<bool> cancelScan(String taskId) async {
     final pigeonVar_channelName =
         'dev.flutter.pigeon.rtpath.ScanApi.cancelScan$pigeonVar_messageChannelSuffix';
@@ -945,5 +1080,46 @@ class ScanApi {
       isNullValid: true,
     );
     return pigeonVar_replyValue as SearchPage?;
+  }
+}
+
+abstract class IndexUpdates {
+  static const MessageCodec<Object?> pigeonChannelCodec = _PigeonCodec();
+
+  void changed(WatchStatus status);
+
+  static void setUp(
+    IndexUpdates? api, {
+    BinaryMessenger? binaryMessenger,
+    String messageChannelSuffix = '',
+  }) {
+    messageChannelSuffix = messageChannelSuffix.isNotEmpty
+        ? '.$messageChannelSuffix'
+        : '';
+    {
+      final pigeonVar_channel = BasicMessageChannel<Object?>(
+        'dev.flutter.pigeon.rtpath.IndexUpdates.changed$messageChannelSuffix',
+        pigeonChannelCodec,
+        binaryMessenger: binaryMessenger,
+      );
+      if (api == null) {
+        pigeonVar_channel.setMessageHandler(null);
+      } else {
+        pigeonVar_channel.setMessageHandler((Object? message) async {
+          final List<Object?> args = message! as List<Object?>;
+          final WatchStatus arg_status = args[0]! as WatchStatus;
+          try {
+            api.changed(arg_status);
+            return wrapResponse(empty: true);
+          } on PlatformException catch (e) {
+            return wrapResponse(error: e);
+          } catch (e) {
+            return wrapResponse(
+              error: PlatformException(code: 'error', message: e.toString()),
+            );
+          }
+        });
+      }
+    }
   }
 }

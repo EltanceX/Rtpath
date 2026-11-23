@@ -1,8 +1,10 @@
 #include "fd.h"
+#include "inotify_watch.h"
 
 #include <android/api-level.h>
 #include <jni.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -34,7 +36,9 @@ constexpr int directoryFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
 constexpr std::size_t batchSize = 512;
 constexpr std::size_t maxDepth = 512;
 constexpr std::uint64_t maxEntries = 2'000'000;
+constexpr std::uint32_t fuseMagic = 0x65735546;
 enum Outcome : jint { complete = 0, cancelled = 1, failed = 2 };
+enum Change : jint { removed = 0, metadataOnly = 1, subtree = 2 };
 
 bool readStatx(int parent, const char* name, int flags, unsigned mask, struct statx& info) {
     // Android 10 does not expose statx in its app ABI.
@@ -136,7 +140,7 @@ Fd openRoot(const std::string& base, std::string_view relative) {
 const char* filesystemName(long magic) {
     switch (static_cast<std::uint32_t>(magic)) {
         case 0xf2f52010: return "f2fs";
-        case 0x65735546: return "fuse";
+        case fuseMagic: return "fuse";
         case 0xef53: return "ext4";
         case 0x01021994: return "tmpfs";
         case 0x794c7630: return "overlay";
@@ -295,35 +299,108 @@ public:
         problem_ = env_->GetMethodID(type, "onProblem", "(Ljava/lang/String;I)V");
         if (!problem_) return;
         isCancelled_ = env_->GetMethodID(type, "isCancelled", "()Z");
+        if (!isCancelled_) return;
+        startChanges_ = env_->GetMethodID(type, "onChanges", "()V");
+        if (!startChanges_) return;
+        path_ = env_->GetMethodID(type, "onPath", "([BI)V");
+        if (!path_) return;
+        checkpoint_ = env_->GetMethodID(type, "onCheckpoint", "(ZZIIIJ)V");
+        if (!checkpoint_) return;
+        gap_ = env_->GetMethodID(type, "onGap", "(Ljava/lang/String;I)V");
         buffer_.reserve(batchSize * 96);
     }
 
     Outcome scan(const std::string& base, const std::string& relative) {
-        if (!isCancelled_ || env_->ExceptionCheck()) return failed;
+        if (!gap_ || env_->ExceptionCheck()) return failed;
         if (stopping()) return cancelled;
 
-        Fd root = openRoot(base, relative);
-        struct stat info {};
-        if (root.get() < 0 || fstat(root.get(), &info) != 0) {
+        root_ = openRoot(base, relative);
+        if (root_.get() < 0 || fstat(root_.get(), &rootInfo_) != 0) {
             issue("open root", errno);
             return failed;
         }
-        mount_ = fdMountId(root.get());
+        mount_ = fdMountId(root_.get());
         if (mount_ == 0) {
             issue("root mount identity", ENOTSUP);
             return failed;
         }
-        Directory rootDirectory(fdopendir(root.get()), closedir);
-        if (!rootDirectory) {
-            issue("fdopendir root", errno);
+        struct statfs filesystem {};
+        fuse_ = fstatfs(root_.get(), &filesystem) == 0 &&
+            static_cast<std::uint32_t>(filesystem.f_type) == fuseMagic;
+        const auto result = walk(Fd(openat(root_.get(), ".", directoryFlags)), rootInfo_, "");
+        if (result != complete) return result;
+        if (watch_.fd() < 0) {
+            if (!checkpoint(true)) return cancelled;
+            return watchFailed();
+        }
+
+        // The baseline remains private until the events produced during enumeration
+        // have been reconciled. Continuous churn can be retried with the old index intact.
+        for (int round = 0;; ++round) {
+            if (stopping()) return cancelled;
+            const bool drained = watch_.drain();
+            if (watch_.error() != 0) return watchFailed();
+            if (!checkRoot(base, relative)) return watchFailed();
+            if (drained && !watch_.hasPending()) break;
+            if (round == 16) {
+                watch_.gap("inotify baseline did not settle", EBUSY);
+                return watchFailed();
+            }
+            if (watch_.hasPending() &&
+                (!reconcile() || watch_.error() != 0 || !checkpoint(false))) return interrupted();
+        }
+        if (!checkpoint(true)) return interrupted();
+
+        auto verifyAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!stopping()) {
+            pollfd ready{watch_.fd(), POLLIN, 0};
+            const int result = poll(&ready, 1, watch_.hasPending() ? 0 : 150);
+            if (result < 0 && errno == EINTR) continue;
+            if (result < 0 || (ready.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                watch_.gap("poll inotify", result < 0 ? errno : EIO);
+                break;
+            }
+            if (result > 0 || watch_.hasPending()) {
+                // Keep both sides of a move and an editor's temporary writes in one commit.
+                watch_.drain();
+                if (watch_.hasPending() && watch_.error() == 0) {
+                    poll(nullptr, 0, 25);
+                    watch_.drain();
+                }
+                if (watch_.error() != 0 || !checkRoot(base, relative)) break;
+                if (watch_.hasPending()) {
+                    if (!reconcile() || watch_.error() != 0 || !checkRoot(base, relative) ||
+                        !checkpoint(false)) return interrupted();
+                }
+            }
+            if (std::chrono::steady_clock::now() >= verifyAt) {
+                if (!checkRoot(base, relative)) break;
+                verifyAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            }
+        }
+        return watch_.error() != 0 ? watchFailed() : cancelled;
+    }
+
+private:
+    struct Frame {
+        Directory directory;
+        std::uint64_t id;
+        struct stat info;
+        std::string path;
+        bool watched;
+    };
+
+    Outcome walk(Fd start, const struct stat& info, std::string path) {
+        entries_ = 0;
+        depthOffset_ = path.empty() ? 0 : 1 + std::count(path.begin(), path.end(), '/');
+        if (start.get() < 0 || !pushDirectory(std::move(start), 1, info, std::move(path))) {
+            issue("fdopendir scan directory", errno);
             return failed;
         }
-        root.release();
-
         append(0, "", info);
-        stack_.push_back({std::move(rootDirectory), entries_, info});
         while (!stack_.empty()) {
             if (stopping()) return cancelled;
+            if (watch_.fd() >= 0 && watch_.error() != 0) return watchFailed();
             auto& frame = stack_.back();
             const int parent = dirfd(frame.directory.get());
             errno = 0;
@@ -331,7 +408,7 @@ public:
             if (!item) {
                 if (errno != 0) {
                     issue("readdir", errno);
-                } else {
+                } else if (!frame.watched) {
                     struct stat after {};
                     if (fstat(parent, &after) != 0) {
                         issue("fstat directory", errno);
@@ -350,45 +427,93 @@ public:
                 issue("entry limit", 0);
                 break;
             }
-            scanChild(parent, frame.id, item->d_name);
-            if (pending_ >= batchSize && !flush()) return failed;
+            scanChild(parent, frame, item->d_name);
+            if (pending_ >= batchSize) {
+                if (watch_.fd() >= 0) watch_.drain();
+                if (!flush()) return failed;
+            }
         }
         if (stopping()) return cancelled;
         return flush() ? complete : failed;
     }
-
-private:
-    struct Frame {
-        Directory directory;
-        std::uint64_t id;
-        struct stat info;
-    };
 
     bool stopping() {
         return env_->ExceptionCheck() || env_->CallBooleanMethod(receiver_, isCancelled_);
     }
 
     void issue(const char* operation, int error) {
+        report(problem_, operation, error);
+    }
+
+    void report(jmethodID callback, const char* operation, int error) {
         if (env_->ExceptionCheck()) return;
         const auto message = env_->NewStringUTF(operation);
         if (!message) return;
-        env_->CallVoidMethod(receiver_, problem_, message, static_cast<jint>(error));
+        env_->CallVoidMethod(receiver_, callback, message, static_cast<jint>(error));
         env_->DeleteLocalRef(message);
     }
 
-    void scanChild(int parent, std::uint64_t parentId, const char* name) {
+    Outcome watchFailed() {
+        report(gap_, watch_.operation(), watch_.error());
+        return failed;
+    }
+
+    Outcome interrupted() {
+        if (watch_.error() != 0) return watchFailed();
+        return stopping() ? cancelled : failed;
+    }
+
+    bool checkpoint(bool baseline) {
+        if (stopping()) return false;
+        env_->CallVoidMethod(receiver_, checkpoint_, static_cast<jboolean>(baseline), static_cast<jboolean>(fuse_),
+            static_cast<jint>(watch_.registered()), static_cast<jint>(watch_.failures()),
+            static_cast<jint>(watch_.registrationError()), static_cast<jlong>(watch_.sequence()));
+        return !env_->ExceptionCheck();
+    }
+
+    bool checkRoot(const std::string& base, const std::string& relative) {
+        Fd root = openRoot(base, relative);
+        struct stat info {};
+        if (root.get() >= 0 && fstat(root.get(), &info) == 0 &&
+            sameFile(info, rootInfo_) && fdMountId(root.get()) == mount_) return true;
+        watch_.gap("inotify scope identity changed", ESTALE);
+        return false;
+    }
+
+    bool pushDirectory(Fd directory, std::uint64_t id, const struct stat& info, std::string path) {
+        Directory stream(fdopendir(directory.get()), closedir);
+        if (!stream) return false;
+        const bool watched = watch_.fd() >= 0 && watch_.add(path, directory.get());
+        directory.release();
+        stack_.push_back({std::move(stream), id, info, std::move(path), watched});
+        return true;
+    }
+
+    static std::string join(const std::string& parent, const char* name) {
+        return parent.empty() ? std::string(name) : parent + "/" + name;
+    }
+
+    static bool disappeared(int error) {
+        return error == ENOENT || error == ENOTDIR || error == ELOOP || error == ESTALE;
+    }
+
+    void scanChild(int parent, const Frame& frame, const char* name) {
         Metadata metadata;
+        const auto retry = [&](const char* operation, int error) {
+            if (frame.watched && disappeared(error)) watch_.dirty(join(frame.path, name));
+            else issue(operation, error);
+        };
         if (!metadataAt(parent, name, metadata)) {
-            issue("read entry metadata", errno);
+            retry("read entry metadata", errno);
             return;
         }
         if (metadata.mount != mount_) {
             issue("mount boundary", 0);
             return;
         }
-        append(parentId, name, metadata.info);
+        append(frame.id, name, metadata.info);
         if (!S_ISDIR(metadata.info.st_mode)) return;
-        if (stack_.size() >= maxDepth) {
+        if (depthOffset_ + stack_.size() >= maxDepth) {
             issue("directory depth limit", 0);
             return;
         }
@@ -396,20 +521,129 @@ private:
         Fd child(openat(parent, name, directoryFlags));
         struct stat opened {};
         if (child.get() < 0 || fstat(child.get(), &opened) != 0) {
-            issue("open child directory", errno);
+            retry("open child directory", errno);
             return;
         }
         if (!sameFile(opened, metadata.info) || fdMountId(child.get()) != mount_) {
-            issue("directory replaced or remounted", ESTALE);
+            retry("directory replaced or remounted", ESTALE);
             return;
         }
-        Directory directory(fdopendir(child.get()), closedir);
-        if (!directory) {
+        if (!pushDirectory(std::move(child), entries_, opened, join(frame.path, name))) {
             issue("fdopendir child", errno);
-            return;
         }
-        child.release();
-        stack_.push_back({std::move(directory), entries_, opened});
+    }
+
+    // Resolve every component from the pinned root. A directory event can
+    // outlive its pathname, so it cannot authorize following a link or mount.
+    Fd openParent(std::string_view path) {
+        Fd parent(openat(root_.get(), ".", directoryFlags));
+        if (parent.get() < 0) {
+            watch_.gap("reopen inotify scope", errno);
+            return parent;
+        }
+        for (std::size_t start = 0; start < path.size();) {
+            const auto slash = path.find('/', start);
+            const std::string name(path.substr(start, slash == path.npos ? slash : slash - start));
+            Fd child(openat(parent.get(), name.c_str(), directoryFlags));
+            if (child.get() < 0) {
+                if (disappeared(errno)) watch_.dirty(std::string(path.substr(0, slash)));
+                else watch_.gap("open inotify parent", errno);
+                return Fd();
+            }
+            if (fdMountId(child.get()) != mount_) {
+                watch_.gap("inotify mount boundary changed", ESTALE);
+                return Fd();
+            }
+            parent = std::move(child);
+            if (slash == path.npos) break;
+            start = slash + 1;
+        }
+        return parent;
+    }
+
+    bool emitPath(const std::string& path, Change change) {
+        const auto value = env_->NewByteArray(static_cast<jsize>(path.size()));
+        if (!value) return false;
+        if (!path.empty()) {
+            env_->SetByteArrayRegion(value, 0, static_cast<jsize>(path.size()),
+                reinterpret_cast<const jbyte*>(path.data()));
+        }
+        if (!env_->ExceptionCheck()) env_->CallVoidMethod(receiver_, path_, value, static_cast<jint>(change));
+        env_->DeleteLocalRef(value);
+        return !env_->ExceptionCheck();
+    }
+
+    bool refresh(const std::string& path, bool metadata) {
+        const auto slash = path.rfind('/');
+        const auto base = slash == path.npos ? std::string_view{} : std::string_view(path).substr(0, slash);
+        auto parent = openParent(base);
+        if (parent.get() < 0) return watch_.error() == 0;
+        const auto* name = path.empty() ? "." : path.c_str() + (slash == path.npos ? 0 : slash + 1);
+        Metadata current;
+        if (!metadataAt(parent.get(), name, current)) {
+            const int error = errno;
+            if (!disappeared(error)) {
+                watch_.gap("read inotify entry metadata", error);
+                return false;
+            }
+            if (metadata) return true;
+            watch_.forget(path);
+            return emitPath(path, removed);
+        }
+        if (current.mount != mount_) {
+            watch_.gap("inotify entry remounted", ESTALE);
+            return false;
+        }
+
+        if (metadata || !S_ISDIR(current.info.st_mode)) {
+            if (!metadata) watch_.forget(path);
+            if (!emitPath(path, metadataOnly)) return false;
+            entries_ = 0;
+            append(0, "", current.info);
+            return flush();
+        }
+
+        Fd directory(openat(parent.get(), name, directoryFlags));
+        struct stat opened {};
+        if (directory.get() < 0 || fstat(directory.get(), &opened) != 0) {
+            const int error = errno;
+            if (!disappeared(error)) {
+                watch_.gap("open inotify child", error);
+                return false;
+            }
+            watch_.dirty(path);
+            return true;
+        }
+        if (!sameFile(opened, current.info) || fdMountId(directory.get()) != mount_) {
+            watch_.dirty(path);
+            return true;
+        }
+        watch_.forget(path);
+        return emitPath(path, subtree) && walk(std::move(directory), current.info, path) == complete;
+    }
+
+    bool reconcile() {
+        const auto paths = watch_.takePending();
+        std::set<std::string> parents;
+        env_->CallVoidMethod(receiver_, startChanges_);
+        for (const auto& path : paths) {
+            if (stopping()) return false;
+            bool covered = false;
+            for (auto slash = path.find('/'); slash != path.npos; slash = path.find('/', slash + 1)) {
+                if (paths.contains(path.substr(0, slash))) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered) continue;
+            if (!refresh(path, false)) return false;
+            const auto slash = path.rfind('/');
+            parents.insert(slash == path.npos ? "" : path.substr(0, slash));
+        }
+        for (const auto& parent : parents) {
+            if (stopping() || !refresh(parent, true)) return false;
+        }
+        return true;
     }
 
     // Each little-endian record contains IDs, kind, size, mtime and the original name bytes.
@@ -453,11 +687,20 @@ private:
     jmethodID batch_ = nullptr;
     jmethodID problem_ = nullptr;
     jmethodID isCancelled_ = nullptr;
+    jmethodID startChanges_ = nullptr;
+    jmethodID path_ = nullptr;
+    jmethodID checkpoint_ = nullptr;
+    jmethodID gap_ = nullptr;
     std::vector<jbyte> buffer_;
     std::vector<Frame> stack_;
     std::size_t pending_ = 0;
+    std::size_t depthOffset_ = 0;
     std::uint64_t entries_ = 0;
     std::uint64_t mount_ = 0;
+    bool fuse_ = false;
+    Fd root_;
+    struct stat rootInfo_ {};
+    rtpath::InotifyWatch watch_;
 };
 
 }  // namespace

@@ -122,27 +122,39 @@ internal class BatchWriter(private val db: SQLiteConnection, generation: String)
         private set
 
     fun write(batch: ByteArray) {
-        val data = ByteBuffer.wrap(batch).order(ByteOrder.LITTLE_ENDIAN)
-        var nextId = count + 1
+        var lastId = count
         db.transaction {
-            while (data.hasRemaining()) {
-                require(data.remaining() >= 35) { "Truncated native scan record" }
-                val id = data.long
-                val parent = data.long
-                val kind = data.get().toInt()
-                val size = data.long
-                val modified = data.long
-                val nameSize = data.short.toInt() and 0xffff
-                require(id == nextId++ && kind in EntryKind.entries.indices && data.remaining() >= nameSize)
-                require(if (id == 1L) parent == 0L && nameSize == 0 else parent in 1 until id && nameSize != 0)
-                val rawName = ByteArray(nameSize).also { data.get(it) }
-                writer.insert(id, parent, rawName, kind, size.takeIf { it >= 0 }, modified)
+            readScanBatch(batch, lastId) { id, parent, name, kind, size, modified ->
+                writer.insert(id, parent, name, kind, size, modified)
+                lastId = id
             }
         }
-        count = nextId - 1
+        count = lastId
     }
 
     override fun close() = writer.close()
+}
+
+internal inline fun readScanBatch(
+    batch: ByteArray,
+    lastId: Long,
+    record: (Long, Long, ByteArray, Int, Long?, Long) -> Unit,
+) {
+    val data = ByteBuffer.wrap(batch).order(ByteOrder.LITTLE_ENDIAN)
+    var nextId = lastId + 1
+    while (data.hasRemaining()) {
+        require(data.remaining() >= 35) { "Truncated native scan record" }
+        val id = data.long
+        val parent = data.long
+        val kind = data.get().toInt()
+        val size = data.long
+        val modified = data.long
+        val nameSize = data.short.toInt() and 0xffff
+        require(id == nextId++ && kind in EntryKind.entries.indices && nameSize <= 255 && data.remaining() >= nameSize)
+        require(if (id == 1L) parent == 0L && nameSize == 0 else parent in 1 until id && nameSize != 0)
+        val rawName = ByteArray(nameSize).also { data.get(it) }
+        record(id, parent, rawName, kind, size.takeIf { it >= 0 }, modified)
+    }
 }
 
 internal fun SQLiteConnection.execute(sql: String) {

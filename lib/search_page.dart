@@ -38,9 +38,14 @@ class _SearchScreenState extends State<SearchScreen>
   Timer? _poll;
   Timer? _rootPoll;
   Timer? _debounce;
+  Timer? _liveRefresh;
   int _loadRequest = 0;
   int _searchRequest = 0;
   int _rootRequest = 0;
+  int _watchRequest = 0;
+  String? _displayGeneration;
+  int _displayRevision = 0;
+  WatchStatus? _watch;
   bool _rootMode = false;
   bool _probing = false;
   RootAccess? _root;
@@ -60,6 +65,7 @@ class _SearchScreenState extends State<SearchScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _scroll.addListener(_prefetch);
+    IndexUpdates.setUp(_WatchUpdates(_onWatch));
     unawaited(_restore());
   }
 
@@ -80,6 +86,8 @@ class _SearchScreenState extends State<SearchScreen>
     _poll?.cancel();
     _rootPoll?.cancel();
     _debounce?.cancel();
+    _liveRefresh?.cancel();
+    IndexUpdates.setUp(null);
     _relative.dispose();
     _absolute.dispose();
     _query.dispose();
@@ -110,10 +118,13 @@ class _SearchScreenState extends State<SearchScreen>
         _indexes = indexes;
         if (initial) _configuring = indexes.isEmpty;
         if (_location == null) _locationId = locations.firstOrNull?.id;
-        _scopeId = indexes.any((index) => index.scopeId == scope)
-            ? scope
-            : indexes.firstOrNull?.scopeId;
+        _setScope(
+          indexes.any((index) => index.scopeId == scope)
+              ? scope
+              : indexes.firstOrNull?.scopeId,
+        );
       });
+      unawaited(_readWatch());
       await _search();
     } catch (error) {
       if (!mounted || request != _loadRequest) return;
@@ -124,12 +135,59 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
-  Future<void> _search() async {
+  void _setScope(String? scope) {
+    if (_scopeId == scope) return;
+    ++_watchRequest;
+    _watch = null;
+    _scopeId = scope;
+  }
+
+  Future<void> _readWatch() async {
+    final scope = _scopeId;
+    if (scope == null) return;
+    final request = ++_watchRequest;
+    try {
+      final watch = await _api.watchStatus(scope);
+      if (!mounted || request != _watchRequest || scope != _scopeId) return;
+      if (watch != null) _onWatch(watch);
+    } on PlatformException {
+      // Search is available even if the watcher status cannot be read.
+    }
+  }
+
+  void _onWatch(WatchStatus status) {
+    if (!mounted || _scopeId != status.scopeId) return;
+    ++_watchRequest;
+    setState(() => _watch = status);
+    _scheduleLiveRefresh();
+  }
+
+  void _scheduleLiveRefresh() {
+    final status = _watch;
+    if (_fetching ||
+        _waitingForInput ||
+        (_liveRefresh?.isActive ?? false) ||
+        status == null ||
+        status.generation != _displayGeneration ||
+        status.revision <= _displayRevision) {
+      return;
+    }
+    _liveRefresh = Timer(const Duration(milliseconds: 60), () {
+      if (mounted && !_waitingForInput && !_fetching) {
+        unawaited(_search(live: true));
+      }
+    });
+  }
+
+  Future<void> _search({bool live = false}) async {
     _debounce?.cancel();
+    _liveRefresh?.cancel();
     final request = ++_searchRequest;
-    setState(_clearResults);
-    if (_scroll.hasClients) _scroll.jumpTo(0);
-    await _fetch(request, null);
+    if (!live) {
+      setState(_clearResults);
+      if (_scroll.hasClients) _scroll.jumpTo(0);
+    }
+    await _fetch(request, null, replace: live);
   }
 
   void _clearResults() {
@@ -138,9 +196,15 @@ class _SearchScreenState extends State<SearchScreen>
     _searchError = null;
     _fetching = false;
     _waitingForInput = false;
+    _displayGeneration = null;
+    _displayRevision = 0;
   }
 
-  Future<void> _fetch(int request, SearchCursor? cursor) async {
+  Future<void> _fetch(
+    int request,
+    SearchCursor? cursor, {
+    bool replace = false,
+  }) async {
     final scope = _scopeId;
     if (scope == null || _fetching) return;
     final text = _query.text;
@@ -170,16 +234,26 @@ class _SearchScreenState extends State<SearchScreen>
           return;
         }
         if (page.reset) {
+          if (replace) {
+            position = null;
+            continue;
+          }
           await _search();
           return;
         }
+        if (page.entries.isEmpty && page.next != null) {
+          position = page.next;
+          await Future<void>.delayed(Duration.zero);
+          continue;
+        }
         setState(() {
+          if (replace) _items.clear();
           _items.addAll(page.entries);
           _next = page.next;
+          _displayGeneration = page.generation;
+          _displayRevision = page.revision;
         });
-        if (page.entries.isNotEmpty || page.next == null) return;
-        position = page.next;
-        await Future<void>.delayed(Duration.zero);
+        return;
       }
     } catch (error) {
       if (!mounted || request != _searchRequest) return;
@@ -187,6 +261,7 @@ class _SearchScreenState extends State<SearchScreen>
     } finally {
       if (mounted && request == _searchRequest) {
         setState(() => _fetching = false);
+        if (_searchError == null) _scheduleLiveRefresh();
       }
     }
   }
@@ -203,6 +278,7 @@ class _SearchScreenState extends State<SearchScreen>
 
   void _queryChanged(String _) {
     _debounce?.cancel();
+    _liveRefresh?.cancel();
     ++_searchRequest;
     setState(() {
       _clearResults();
@@ -304,7 +380,7 @@ class _SearchScreenState extends State<SearchScreen>
     setState(() {
       _rootMode = root;
       _indexes = [];
-      _scopeId = null;
+      _setScope(null);
       _error = null;
       _loading = true;
       _configuring = true;
@@ -428,10 +504,12 @@ class _SearchScreenState extends State<SearchScreen>
               ),
           ],
           onChanged: (id) {
-            setState(() => _scopeId = id);
+            setState(() => _setScope(id));
+            unawaited(_readWatch());
             unawaited(_search());
           },
         ),
+        _watchLabel(),
       ] else if (!_loading && _error == null)
         const Text('扫描一个目录以建立索引。'),
     ];
@@ -507,6 +585,18 @@ class _SearchScreenState extends State<SearchScreen>
         ),
       ),
     );
+  }
+
+  Widget _watchLabel() {
+    final watch = _watch;
+    final label = switch (watch?.state) {
+      WatchState.starting => '正在建立监听',
+      WatchState.live => '实时更新 · ${watch!.watched} 个目录',
+      WatchState.limited => '部分实时覆盖 · ${watch!.message}',
+      WatchState.stopped => '实时更新已停止 · ${watch!.message ?? '可重新扫描'}',
+      null => '历史索引 · 重新扫描可恢复实时更新',
+    };
+    return Text(label, style: Theme.of(context).textTheme.bodySmall);
   }
 
   Widget _searchToolbar(BuildContext context) => Material(
@@ -763,4 +853,13 @@ class _SearchScreenState extends State<SearchScreen>
       ),
     );
   }
+}
+
+class _WatchUpdates extends IndexUpdates {
+  _WatchUpdates(this.onChange);
+
+  final void Function(WatchStatus) onChange;
+
+  @override
+  void changed(WatchStatus status) => onChange(status);
 }

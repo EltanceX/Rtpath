@@ -125,13 +125,13 @@ internal class RootBackend(private val context: Context) {
             }
             finished = !receiver.isCancelled()
             if (outcome != NativeScanner.CANCELLED && requireConnected() !== root) {
-                throw RootFailure("扫描期间 Root 连接已断开")
+                throw RootFailure("Root 连接已断开")
             }
             return outcome
         } catch (failure: Exception) {
             if (receiver.isCancelled()) return NativeScanner.CANCELLED
-            if (!isCurrent(root)) throw RootFailure("扫描期间 Root 连接已断开", failure)
-            if (failure is EOFException) throw RootFailure("Root 服务未交付完整扫描结果", failure)
+            if (!isCurrent(root)) throw RootFailure("Root 连接已断开", failure)
+            if (failure is EOFException) throw RootFailure("Root 服务的索引数据流提前结束", failure)
             throw failure
         } finally {
             pipe.forEach { it.closeQuietly() }

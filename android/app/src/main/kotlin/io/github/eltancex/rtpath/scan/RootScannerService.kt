@@ -83,7 +83,7 @@ class RootScannerService : RootService() {
             authorize()
             val scope = rootScope(absolutePath)
             synchronized(lock) {
-                check(running == null && !destroyed && !probing) { "Root 服务正在处理其他操作" }
+                check(!destroyed && !probing) { "Root 服务正在处理其他操作" }
                 probing = true
             }
             try {
@@ -122,6 +122,12 @@ class RootScannerService : RootService() {
                     override fun isCancelled() = job.cancelled
                     override fun onBatch(batch: ByteArray) = RootWire.writeBatch(output, batch)
                     override fun onProblem(operation: String, error: Int) = RootWire.writeProblem(output, operation, error)
+                    override fun onChanges() = RootWire.writeChanges(output)
+                    override fun onPath(path: ByteArray, change: Int) = RootWire.writePath(output, path, change)
+                    override fun onCheckpoint(
+                        baseline: Boolean, fuse: Boolean, watched: Int, failed: Int, error: Int, sequence: Long,
+                    ) = RootWire.writeCheckpoint(output, baseline, fuse, watched, failed, error, sequence)
+                    override fun onGap(operation: String, error: Int) = RootWire.writeGap(output, operation, error)
                 },
             )
             RootWire.writeEnd(output, result)

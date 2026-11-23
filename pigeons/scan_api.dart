@@ -86,6 +86,30 @@ class PublishedIndex {
   bool partial;
 }
 
+enum WatchState { starting, live, limited, stopped }
+
+class WatchStatus {
+  WatchStatus({
+    required this.scopeId,
+    required this.generation,
+    required this.revision,
+    required this.state,
+    required this.watched,
+    required this.failures,
+    required this.sequence,
+    this.message,
+  });
+
+  String scopeId;
+  String generation;
+  int revision;
+  WatchState state;
+  int watched;
+  int failures;
+  int sequence;
+  String? message;
+}
+
 enum EntryKind { file, directory, symlink, other }
 
 class SearchEntry {
@@ -175,6 +199,9 @@ abstract class ScanApi {
   ScanStatus? status();
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  WatchStatus? watchStatus(String scopeId);
+
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
   bool cancelScan(String taskId);
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
@@ -185,4 +212,9 @@ abstract class ScanApi {
     bool descending,
     SearchCursor? cursor,
   );
+}
+
+@FlutterApi()
+abstract class IndexUpdates {
+  void changed(WatchStatus status);
 }
