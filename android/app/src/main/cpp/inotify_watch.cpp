@@ -111,17 +111,21 @@ void InotifyWatch::forget(const std::string& path, bool keepDirectory) {
     }
 }
 
-void InotifyWatch::gap(const char* operation, int error) {
+void ChangeWatch::gap(const char* operation, int error) {
     if (error_ != 0) return;
     operation_ = operation;
     error_ = error;
 }
 
-void InotifyWatch::dirty(std::string path) {
+void ChangeWatch::dirty(std::string path) {
     const auto [it, inserted] = pending_.insert(std::move(path));
     if (inserted) pendingBytes_ += it->size();
-    if (pending_.size() + moves_.size() > pendingLimit() || pendingBytes_ > maxPendingBytes) {
-        gap("inotify pending paths overflow", ENOBUFS);
+    checkPendingLimit();
+}
+
+void ChangeWatch::checkPendingLimit() {
+    if (pending_.size() + extraPending() > pendingLimit() || pendingBytes_ > maxPendingBytes) {
+        gap(pendingOverflow(), ENOBUFS);
     }
 }
 
@@ -156,9 +160,7 @@ void InotifyWatch::event(int descriptor, std::uint32_t mask, std::uint32_t cooki
         pendingBytes_ += path.size();
         const auto [_, inserted] = moves_.try_emplace(cookie, path);
         if (inserted) {
-            if (moves_.size() + pending_.size() > pendingLimit() || pendingBytes_ > maxPendingBytes) {
-                gap("inotify pending moves overflow", ENOBUFS);
-            }
+            checkPendingLimit();
             return;
         }
         pendingBytes_ -= path.size();
@@ -203,6 +205,10 @@ bool InotifyWatch::drain() {
 std::set<std::string> InotifyWatch::takePending() {
     for (auto& [cookie, path] : moves_) pending_.insert(std::move(path));
     moves_.clear();
+    return ChangeWatch::takePending();
+}
+
+std::set<std::string> ChangeWatch::takePending() {
     pendingBytes_ = 0;
     return std::exchange(pending_, {});
 }

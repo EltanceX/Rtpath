@@ -29,7 +29,10 @@ internal class ScanCoordinator private constructor(context: Context) {
     private var rootSession: Session? = null
     private val listeners = CopyOnWriteArraySet<(WatchStatus) -> Unit>()
 
-    private data class Recovery(val reason: String, val started: Long, val expected: ScopeIdentity, val attempts: Int)
+    private data class Recovery(
+        val reason: String, val started: Long, val expected: ScopeIdentity, val attempts: Int,
+        val forceInotify: Boolean = false,
+    )
 
     private class Session(val scope: ScanScope, val id: String, val remote: IRootScanner?, val recovery: Recovery?) {
         @Volatile var stopReason: String? = null
@@ -171,6 +174,8 @@ internal class ScanCoordinator private constructor(context: Context) {
                     var done = false
                     var lastSequence = 0L
                     var repairReport: RepairReport? = null
+                    var usingFanotify = false
+                    var backendReason = ""
                     fun finishBaseline() {
                         if (baselineWriter == null) return
                         count = baseline.count - 1
@@ -210,6 +215,11 @@ internal class ScanCoordinator private constructor(context: Context) {
                             finishBaseline()
                             check(changes == null)
                             changes = IndexChanges(db, generation, scope.id, published)
+                        }
+
+                        override fun onBackend(fanotify: Boolean, reason: String) {
+                            usingFanotify = fanotify
+                            backendReason = reason
                         }
 
                         override fun onPath(path: ByteArray, change: Int) {
@@ -266,6 +276,11 @@ internal class ScanCoordinator private constructor(context: Context) {
                                 changes = null
                                 if (published) {
                                     val message = buildList {
+                                        if (remote != null) {
+                                            add(if (usingFanotify) "fanotify · $watched 个文件系统标记" else "inotify · $watched 个目录")
+                                            if (backendReason.isNotEmpty()) add(backendReason)
+                                            if (session.recovery?.forceInotify == true) add(session.recovery.reason)
+                                        }
                                         if (fuse) add("FUSE 视图可能漏报底层直写")
                                         if (failed > 0) add(formatError("${failed} 个目录无法监听", error))
                                     }.joinToString(" · ").ifEmpty { null }
@@ -287,13 +302,14 @@ internal class ScanCoordinator private constructor(context: Context) {
                             // Frequent overflows get a bounded retry budget. A healthy
                             // session earns a fresh retry after it has been live for a while.
                             val attempts = if (ready != null && now - ready >= 30_000) 0 else session.recovery?.attempts ?: 0
-                            val canRebuild = error == OsConstants.ENOBUFS ||
+                            val fallback = usingFanotify && operation != "scan scope identity changed"
+                            val canRebuild = fallback || error == OsConstants.ENOBUFS ||
                                 (error == OsConstants.ENODATA && operation == "inotify scope watch restored")
                             if (identity.mount != 0L && canRebuild &&
-                                (published || (session.recovery?.expected?.mount ?: 0L) != 0L) &&
+                                (fallback || published || (session.recovery?.expected?.mount ?: 0L) != 0L) &&
                                 attempts < 2) {
                                 recovery = Recovery(checkNotNull(reason), session.recovery?.started?.takeIf { attempts > 0 } ?: now,
-                                    identity, attempts + 1)
+                                    identity, attempts + 1, fallback || session.recovery?.forceInotify == true)
                             }
                         }
 
@@ -308,8 +324,11 @@ internal class ScanCoordinator private constructor(context: Context) {
 
                     try {
                         val expected = session.recovery?.expected ?: ScopeIdentity()
-                        val outcome = if (remote != null) root.run(remote, generation, scope, expected, receiver)
-                        else NativeScanner.run(scope, indexDirectory.absolutePath, expected, receiver)
+                        val outcome = if (remote != null) {
+                            root.run(remote, generation, scope, expected, session.recovery?.forceInotify == true, receiver)
+                        } else {
+                            NativeScanner.run(scope, indexDirectory.absolutePath, expected, receiver)
+                        }
                         if (outcome == NativeScanner.FAILED) {
                             reason = reason ?: synchronized(lock) { latest?.takeIf { it.taskId == generation }?.message }
                                 ?: "原生扫描失败"

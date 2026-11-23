@@ -523,6 +523,15 @@ void main() {
       );
       expect(rootIndex.generation, first.taskId);
       expect(rootIndex.partial, isFalse);
+      final watcher = await _waitWatch(api, scope, WatchState.live);
+      final admitted = probes.first.contains('fanotify verified');
+      expect(
+        watcher.message,
+        startsWith(admitted ? 'fanotify · ' : 'inotify · '),
+      );
+      debugPrint(
+        'RtPath phase 6: ${probes.first}; selected ${watcher.message}',
+      );
 
       final livePath = '$rootFixture/live-protected.txt';
       await _runRoot("printf 'first' > '$livePath'");
@@ -543,6 +552,38 @@ void main() {
       );
       await _runRoot("rm '$rootFixture/live-renamed.txt'");
       await _waitForPage(api, scope, 'live-', (it) => it.entries.isEmpty);
+      await _runRoot(
+        "mkdir -p '$rootFixture/from/moved' '$rootFixture/to' && "
+        "printf 'tree' > '$rootFixture/from/moved/fanotify-probe.txt'",
+      );
+      await _waitForPage(
+        api,
+        scope,
+        'fanotify-probe',
+        (it) =>
+            it.entries.singleOrNull?.path ==
+            '$rootFixture/from/moved/fanotify-probe.txt',
+      );
+      await _runRoot("mv '$rootFixture/from/moved' '$rootFixture/to/moved'");
+      final moved = await _waitForPage(
+        api,
+        scope,
+        'fanotify-probe',
+        (it) =>
+            it.entries.singleOrNull?.path ==
+            '$rootFixture/to/moved/fanotify-probe.txt',
+      );
+      expect(moved.generation, first.taskId);
+      await _runRoot(
+        "rm '$rootFixture/to/moved/fanotify-probe.txt' && "
+        "rmdir '$rootFixture/to/moved' '$rootFixture/from' '$rootFixture/to'",
+      );
+      await _waitForPage(
+        api,
+        scope,
+        'fanotify-probe',
+        (it) => it.entries.isEmpty,
+      );
       debugPrint(
         'RtPath phase 4: protected Root scope updated through the metadata pipe',
       );

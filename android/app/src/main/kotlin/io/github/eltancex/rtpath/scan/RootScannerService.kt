@@ -51,7 +51,7 @@ class RootScannerService : RootService() {
         }
 
         override fun start(
-            taskId: String, absolutePath: String, mount: Long, device: Long, inode: Long,
+            taskId: String, absolutePath: String, mount: Long, device: Long, inode: Long, forceInotify: Boolean,
             output: ParcelFileDescriptor, client: IBinder,
         ) {
             try {
@@ -63,7 +63,7 @@ class RootScannerService : RootService() {
                     val job = Job(taskId, client)
                     client.linkToDeath(job.death, 0)
                     running = job
-                    worker.execute { stream(job, scope, ScopeIdentity(mount, device, inode), output) }
+                    worker.execute { stream(job, scope, ScopeIdentity(mount, device, inode), forceInotify, output) }
                 }
             } catch (failure: Throwable) {
                 output.close()
@@ -93,10 +93,11 @@ class RootScannerService : RootService() {
                 val user = applicationInfo.uid / 100000
                 val appCache = File(applicationInfo.dataDir, "cache").canonicalPath
                 val external = "/storage/emulated/$user/Android/data/$packageName/cache"
+                val fixtures = fanotifyFixtures()
                 return listOf(
-                    render(scope, mark = true, exercise = false),
-                    render(rootScope(appCache), mark = true, exercise = true),
-                    render(rootScope(external), mark = true, exercise = true),
+                    render(scope, fixtures),
+                    render(rootScope(appCache), fixtures),
+                    render(rootScope(external), fixtures),
                 )
             } finally {
                 synchronized(lock) { probing = false }
@@ -106,16 +107,28 @@ class RootScannerService : RootService() {
 
     private fun inspectKnown(path: String): String {
         val canonical = File(path).canonicalPath
-        val description = render(rootScope(canonical), mark = false, exercise = false)
+        val description = render(rootScope(canonical))
         return if (canonical == path) description else "$path → $description"
     }
 
-    private fun render(scope: ScanScope, mark: Boolean, exercise: Boolean): String =
+    private fun render(scope: ScanScope, fixtures: ByteArray? = null): String =
         "${scope.path} · " + NativeScanner.inspectDirectory(
-            scope.path.toByteArray(Charsets.UTF_8), mark, exercise,
+            scope.path.toByteArray(Charsets.UTF_8), fixtures,
         )
 
-    private fun stream(job: Job, scope: ScanScope, expected: ScopeIdentity, fd: ParcelFileDescriptor) {
+    // Probe writes are confined to RtPath caches. Native checks each candidate's actual mount.
+    private fun fanotifyFixtures(): ByteArray {
+        val user = applicationInfo.uid / 100000
+        return buildList {
+            add(File(applicationInfo.dataDir, "cache").absolutePath)
+            if (user == 0) add("/data/data/$packageName/cache")
+            add("/data/media/$user/Android/data/$packageName/cache")
+        }.joinToString("\u0000").toByteArray(Charsets.UTF_8)
+    }
+
+    private fun stream(
+        job: Job, scope: ScanScope, expected: ScopeIdentity, forceInotify: Boolean, fd: ParcelFileDescriptor,
+    ) {
         val output = DataOutputStream(BufferedOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(fd)))
         try {
             RootWire.writeHeader(output, job.id)
@@ -125,6 +138,7 @@ class RootScannerService : RootService() {
                     override fun isCancelled() = job.cancelled
                     override fun onBatch(batch: ByteArray) = RootWire.writeBatch(output, batch)
                     override fun onProblem(operation: String, error: Int) = RootWire.writeProblem(output, operation, error)
+                    override fun onBackend(fanotify: Boolean, reason: String) = RootWire.writeBackend(output, fanotify, reason)
                     override fun onChanges() = RootWire.writeChanges(output)
                     override fun onPath(path: ByteArray, change: Int) = RootWire.writePath(output, path, change)
                     override fun onCheckpoint(
@@ -136,6 +150,7 @@ class RootScannerService : RootService() {
                     override fun onRepair(path: ByteArray, directories: Long, entries: Long, millis: Long) =
                         RootWire.writeRepair(output, path, directories, entries, millis)
                 },
+                if (forceInotify) null else fanotifyFixtures(),
             )
             RootWire.writeEnd(output, result)
         } catch (error: Exception) {

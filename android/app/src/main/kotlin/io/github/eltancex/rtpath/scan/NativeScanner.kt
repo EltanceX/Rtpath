@@ -6,6 +6,7 @@ import androidx.annotation.Keep
 internal interface ScanReceiver {
     fun onBatch(batch: ByteArray)
     fun onProblem(operation: String, error: Int)
+    fun onBackend(fanotify: Boolean, reason: String)
     fun onChanges()
     fun onPath(path: ByteArray, change: Int)
     fun onCheckpoint(baseline: Boolean, fuse: Boolean, watched: Int, failed: Int, error: Int, sequence: Long)
@@ -28,17 +29,20 @@ internal object NativeScanner {
         System.loadLibrary("rtpath_probe")
     }
 
-    fun run(scope: ScanScope, indexDirectory: String, expected: ScopeIdentity, receiver: ScanReceiver): Int = walk(
+    fun run(
+        scope: ScanScope, indexDirectory: String, expected: ScopeIdentity, receiver: ScanReceiver,
+        fixtures: ByteArray? = null,
+    ): Int = walk(
         scope.base.toByteArray(Charsets.UTF_8), scope.relativePath.toByteArray(Charsets.UTF_8),
-        indexDirectory.toByteArray(Charsets.UTF_8), expected.mount, expected.device, expected.inode, receiver,
+        indexDirectory.toByteArray(Charsets.UTF_8), expected.mount, expected.device, expected.inode, fixtures, receiver,
     )
 
     private external fun walk(
         basePath: ByteArray, relativePath: ByteArray, indexDirectoryPath: ByteArray,
-        mount: Long, device: Long, inode: Long, receiver: ScanReceiver,
+        mount: Long, device: Long, inode: Long, fixturePaths: ByteArray?, receiver: ScanReceiver,
     ): Int
 
-    external fun inspectDirectory(absolutePath: ByteArray, mark: Boolean, exercise: Boolean): String
+    external fun inspectDirectory(absolutePath: ByteArray, fixturePaths: ByteArray? = null): String
 }
 
 internal data class ScopeIdentity(val mount: Long = 0, val device: Long = 0, val inode: Long = 0)

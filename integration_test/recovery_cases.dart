@@ -361,20 +361,37 @@ void _registerRecoveryTests(
           (await _waitFor(api, initial.taskId, (it) => !_active(it))).published,
           isTrue,
         );
+        final watch = await _waitWatch(api, scope, WatchState.live);
+        final fanotify = watch.message?.startsWith('fanotify · ') == true;
+        final backend = fanotify ? 'fanotify' : 'inotify';
         final kernelCap = int.parse(
-          await _rootOutput('cat /proc/sys/fs/inotify/max_queued_events'),
+          await _rootOutput('cat /proc/sys/fs/$backend/max_queued_events'),
         );
         expect(kernelCap, inInclusiveRange(128, 131072));
         await _runRoot('kill -STOP $servicePid');
         try {
-          // Two alternating paths defeat kernel coalescing while the app queue
-          // retains only two dirty paths.
-          await _runRoot(
-            'i=0; while [ \$i -lt ${kernelCap ~/ 2 + 1024} ]; do '
-            ": > '$scopePath/Overflow-A.txt' && : > '$scopePath/Overflow-B.txt' || exit 1; "
-            'i=\$((i+1)); done; '
-            "printf final > '$scopePath/Overflow-A.txt'",
-          );
+          if (fanotify) {
+            // Fanotify can merge repeated names across the queue. Unique paths
+            // outside the scope fill only its filesystem-level kernel queue.
+            final flood = '$rootFixture/fanotify-overflow';
+            await _runRoot(
+              "mkdir -m 700 '$flood' && "
+              "printf final > '$scopePath/Overflow-A.txt' && "
+              ": > '$scopePath/Overflow-B.txt' || exit 1; "
+              'i=0; while [ \$i -lt ${kernelCap + 1024} ]; do '
+              ": > '$flood/entry-\$i' || exit 1; "
+              'i=\$((i+1)); done',
+            );
+          } else {
+            // Two alternating paths defeat inotify coalescing while the app
+            // queue retains only two dirty paths.
+            await _runRoot(
+              'i=0; while [ \$i -lt ${kernelCap ~/ 2 + 1024} ]; do '
+              ": > '$scopePath/Overflow-A.txt' && : > '$scopePath/Overflow-B.txt' || exit 1; "
+              'i=\$((i+1)); done; '
+              "printf final > '$scopePath/Overflow-A.txt'",
+            );
+          }
         } finally {
           await _runRoot('kill -CONT $servicePid');
         }
@@ -385,7 +402,7 @@ void _registerRecoveryTests(
               it.state == WatchState.recovering &&
               it.generation == initial.taskId,
         );
-        expect(gap.message, contains('inotify kernel queue overflow'));
+        expect(gap.message, contains('$backend kernel queue overflow'));
         expect((await api.find(scope, 'keep-root'))?.entries.single.bytes, 3);
         final repaired = await _waitRecoveryStatus(
           api,
@@ -394,10 +411,11 @@ void _registerRecoveryTests(
               it.state == WatchState.live && it.generation != initial.taskId,
         );
         expect(repaired.lastRepair?.entries, 3);
+        expect(repaired.message, startsWith('inotify · '));
         expect((await api.find(scope, 'overflow-a'))?.entries.single.bytes, 5);
         expect((await api.find(scope, 'overflow-b'))?.entries.single.bytes, 0);
         debugPrint(
-          'RtPath phase 5: kernel IN_Q_OVERFLOW at cap $kernelCap, '
+          'RtPath phase 5: $backend kernel queue overflow at cap $kernelCap, '
           'Root repair ${repaired.lastRepair!.directories} directory / ${repaired.lastRepair!.entries} entries '
           'in ${repaired.lastRepair!.millis}ms',
         );
@@ -408,7 +426,7 @@ void _registerRecoveryTests(
         );
         mounted = true;
         final changedMount = await _waitWatch(api, scope, WatchState.stopped);
-        expect(changedMount.message, contains('inotify scope'));
+        expect(changedMount.message, contains('scope identity changed'));
         expect((await api.find(scope, 'keep-root'))?.entries.single.bytes, 3);
         expect((await api.find(scope, 'alternate-mount'))?.entries, isEmpty);
         final whileMounted = await api.repair(scope);

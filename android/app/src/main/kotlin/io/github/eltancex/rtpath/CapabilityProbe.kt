@@ -94,7 +94,7 @@ internal object CapabilityProbe {
             }
         }
         val mount = if (error == null && file != null) runCatching {
-            NativeScanner.inspectDirectory(file.absolutePath.toByteArray(Charsets.UTF_8), false, false)
+            NativeScanner.inspectDirectory(file.absolutePath.toByteArray(Charsets.UTF_8))
         }.getOrNull() else null
         return mapOf("label" to label, "path" to file?.absolutePath, "error" to error, "mount" to mount)
     }

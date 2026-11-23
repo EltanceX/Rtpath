@@ -31,7 +31,7 @@ adb -s '<device-id>' shell am start -W -n io.github.eltancex.rtpath/.MainActivit
 
 已授权 Root 的开发机通过 `su` 调用包管理器安装，避免等待普通 USB 安装确认。普通设备可省略 `-UseRoot`。安装后应用以自己的普通 UID 运行。需要调试已启动的应用时可用 `flutter attach -d '<device-id>'`。
 
-从首页工具栏打开能力检测，可查看 Android、ABI、应用 UID、SQLite 版本和普通进程的挂载视图。连接 Root 后，扫描设置中的「探测 fanotify」在实际 Root 进程执行，使用两个应用缓存目录做事件夹具。
+从首页工具栏打开能力检测，可查看 Android、ABI、应用 UID、SQLite 版本和普通进程的挂载视图。连接 Root 后，扫描设置中的「探测 fanotify」会从实际 Root 进程验证选定挂载。事件夹具使用同挂载的应用缓存。[阶段 6 Root fanotify](docs/phase6-fanotify.md)
 
 ## 验证
 

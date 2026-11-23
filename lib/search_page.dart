@@ -681,7 +681,7 @@ class _SearchScreenState extends State<SearchScreen>
 
   String _watchDescription(WatchStatus? watch) => switch (watch?.state) {
     WatchState.starting => '正在建立监听',
-    WatchState.live => '实时更新 · ${watch!.watched} 个目录',
+    WatchState.live => '实时更新 · ${watch!.message ?? '${watch.watched} 个目录'}',
     WatchState.limited => '部分实时覆盖 · ${watch!.message}',
     WatchState.stopped => '实时更新已停止 · ${watch!.message ?? '可重新扫描'}',
     WatchState.recovering => '正在校验索引 · ${watch!.message ?? '保留历史结果'}',

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "change_watch.h"
 #include "fd.h"
 
 #include <cstdint>
@@ -11,28 +12,26 @@
 
 namespace rtpath {
 
-class InotifyWatch {
+class InotifyWatch final : public ChangeWatch {
 public:
     InotifyWatch();
 
-    int fd() const { return fd_.get(); }
-    int error() const { return error_; }
-    const char* operation() const { return operation_; }
-    int registrationError() const { return registrationError_; }
-    std::size_t registered() const { return paths_.size(); }
-    std::size_t failures() const { return failed_.size(); }
-    std::uint64_t sequence() const { return sequence_; }
-    bool hasPending() const { return !pending_.empty() || !moves_.empty(); }
+    int fd() const override { return fd_.get(); }
+    int registrationError() const override { return registrationError_; }
+    std::size_t registered() const override { return paths_.size(); }
+    std::size_t failures() const override { return failed_.size(); }
+    bool hasPending() const override { return ChangeWatch::hasPending() || !moves_.empty(); }
 
-    bool add(const std::string& path, int directory, bool containsIndexFiles);
-    void forget(const std::string& path, bool keepDirectory = false);
-    std::optional<std::string> nextFailed(const std::string& after) const;
-    void dirty(std::string path);
-    bool drain();
-    void gap(const char* operation, int error);
-    std::set<std::string> takePending();
+    bool add(const std::string& path, int directory, bool containsIndexFiles) override;
+    void forget(const std::string& path, bool keepDirectory) override;
+    std::optional<std::string> nextFailed(const std::string& after) const override;
+    bool drain() override;
+    std::set<std::string> takePending() override;
 
 private:
+    std::size_t extraPending() const override { return moves_.size(); }
+    const char* pendingOverflow() const override { return "inotify pending paths overflow"; }
+
     struct WatchedDirectory {
         std::string path;
         bool containsIndexFiles;
@@ -45,13 +44,8 @@ private:
     std::map<std::string, int> paths_;
     std::unordered_map<int, WatchedDirectory> descriptors_;
     std::set<std::string> failed_;
-    std::set<std::string> pending_;
     std::unordered_map<std::uint32_t, std::string> moves_;
-    std::size_t pendingBytes_ = 0;
-    std::uint64_t sequence_ = 0;
-    int error_ = 0;
     int registrationError_ = 0;
-    const char* operation_ = nullptr;
 };
 
 }  // namespace rtpath

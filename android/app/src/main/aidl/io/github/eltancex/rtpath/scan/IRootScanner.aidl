@@ -5,7 +5,7 @@ import android.os.ParcelFileDescriptor;
 
 interface IRootScanner {
     Bundle inspect();
-    void start(String taskId, String absolutePath, long mount, long device, long inode,
+    void start(String taskId, String absolutePath, long mount, long device, long inode, boolean forceInotify,
         in ParcelFileDescriptor output, IBinder client);
     void cancel(String taskId);
     boolean awaitIdle(String taskId);

@@ -58,7 +58,7 @@ function Invoke-RtPathTestRun([string]$ExpectedLog) {
             --use-existing-app $rtpathUri --timeout 150
         if ($LASTEXITCODE -ne 0) { throw 'Flutter integration test failed.' }
         $rtpathChecks = & $rtpathAdb -s $Serial logcat -d "--pid=$($rtpathAppPid.Trim())" -s flutter:I |
-            Select-String 'RtPath phase [1-5]|Android \d+ \(API '
+            Select-String 'RtPath phase [1-6]|Android \d+ \(API '
         $rtpathChecks | Write-Output
         if (-not ($rtpathChecks | Select-String -SimpleMatch $ExpectedLog)) {
             throw "Expected test result missing ($ExpectedLog)."

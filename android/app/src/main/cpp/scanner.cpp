@@ -1,3 +1,4 @@
+#include "fanotify_watch.h"
 #include "fd.h"
 #include "index_files.h"
 #include "inotify_watch.h"
@@ -6,7 +7,6 @@
 #include <jni.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -15,7 +15,6 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <linux/fanotify.h>
 #include <limits>
 #include <linux/stat.h>
 #include <memory>
@@ -153,100 +152,19 @@ std::string probeError(const char* operation, int error) {
     return std::string(operation) + " errno=" + std::to_string(error) + " (" + std::strerror(error) + ")";
 }
 
-// Match a named directory-entry event rather than any traffic on the filesystem.
-std::string_view eventName(const unsigned char* record, std::size_t size, std::size_t start) {
-    constexpr auto base = offsetof(fanotify_event_info_fid, handle);
-    // The Linux file_handle header has two 32-bit fields before its bytes.
-    constexpr auto handleHeader = sizeof(std::uint32_t) + sizeof(std::int32_t);
-    while (start + sizeof(fanotify_event_info_header) <= size) {
-        fanotify_event_info_header info{};
-        std::memcpy(&info, record + start, sizeof(info));
-        if (info.len < sizeof(info) || info.len > size - start) break;
-        if (info.info_type == FAN_EVENT_INFO_TYPE_DFID_NAME && info.len >= base + handleHeader) {
-            unsigned int handleBytes = 0;
-            std::memcpy(&handleBytes, record + start + base, sizeof(handleBytes));
-            const auto header = base + handleHeader;
-            if (handleBytes < info.len - header) {
-                const auto* name = reinterpret_cast<const char*>(record + start + header + handleBytes);
-                const auto available = info.len - header - handleBytes;
-                const auto length = strnlen(name, available);
-                if (length < available) return {name, length};
-            }
-        }
-        start += info.len;
+Fd fixtureOnMount(std::string_view candidates, std::uint64_t mount) {
+    while (!candidates.empty()) {
+        const auto end = candidates.find('\0');
+        const std::string candidate(candidates.substr(0, end));
+        Fd directory(open(candidate.c_str(), directoryFlags));
+        if (directory.get() >= 0 && fdMountId(directory.get()) == mount) return directory;
+        if (end == candidates.npos) break;
+        candidates.remove_prefix(end + 1);
     }
-    return {};
+    return Fd();
 }
 
-std::string exerciseFanotify(int group, int directory) {
-    static std::atomic<unsigned> next{0};
-    const auto prefix = ".rtpath-fanotify-" + std::to_string(getpid()) + "-" + std::to_string(next++);
-    const auto original = prefix + "-create";
-    const auto renamed = prefix + "-rename";
-    if (mkdirat(directory, prefix.c_str(), 0700) != 0) return probeError("mkdirat fixture", errno);
-    {
-        Fd fixture(openat(directory, prefix.c_str(), directoryFlags));
-        int error = 0;
-        if (fixture.get() < 0) {
-            error = errno;
-        } else {
-            Fd marker(openat(fixture.get(), original.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
-            if (marker.get() < 0 || renameat(fixture.get(), original.c_str(), fixture.get(), renamed.c_str()) != 0 ||
-                unlinkat(fixture.get(), renamed.c_str(), 0) != 0) {
-                error = errno;
-                unlinkat(fixture.get(), original.c_str(), 0);
-                unlinkat(fixture.get(), renamed.c_str(), 0);
-            }
-        }
-        if (unlinkat(directory, prefix.c_str(), AT_REMOVEDIR) != 0 && error == 0) error = errno;
-        if (error != 0) return probeError("event fixture", error);
-    }
-    constexpr auto expected = FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO;
-    std::uint64_t found = 0;
-    bool overflow = false;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    unsigned char data[16 * 1024];
-    while (found != expected && !overflow) {
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0) break;
-        pollfd ready{group, POLLIN, 0};
-        const auto status = poll(&ready, 1, static_cast<int>(remaining));
-        if (status < 0 && errno == EINTR) continue;
-        if (status < 0) return probeError("poll fanotify", errno);
-        if (status == 0) break;
-        const auto length = read(group, data, sizeof(data));
-        if (length < 0 && (errno == EAGAIN || errno == EINTR)) continue;
-        if (length < 0) return probeError("read fanotify", errno);
-        if (length == 0) break;
-        const auto total = static_cast<std::size_t>(length);
-        std::size_t offset = 0;
-        while (offset + sizeof(fanotify_event_metadata) <= total) {
-            fanotify_event_metadata event{};
-            std::memcpy(&event, data + offset, sizeof(event));
-            if (event.vers != FANOTIFY_METADATA_VERSION || event.metadata_len < sizeof(event) ||
-                event.event_len < event.metadata_len || event.event_len > total - offset) {
-                return "fanotify event format unsupported";
-            }
-            Fd eventFd(event.fd);
-            overflow |= (event.mask & FAN_Q_OVERFLOW) != 0;
-            const auto name = eventName(data + offset, event.event_len, event.metadata_len);
-            if (name == original) found |= event.mask & (FAN_CREATE | FAN_MOVED_FROM);
-            if (name == renamed) found |= event.mask & (FAN_DELETE | FAN_MOVED_TO);
-            offset += event.event_len;
-        }
-    }
-    if (overflow) return "fanotify queue overflow";
-    std::string result = "verified names:";
-    if (found & FAN_CREATE) result += " CREATE";
-    if (found & FAN_MOVED_FROM) result += " MOVED_FROM";
-    if (found & FAN_MOVED_TO) result += " MOVED_TO";
-    if (found & FAN_DELETE) result += " DELETE";
-    if (found != expected) result += " (incomplete)";
-    return result;
-}
-
-std::string inspectDirectory(const std::string& absolute, bool mark, bool exercise) {
+std::string inspectDirectory(const std::string& absolute, const std::optional<std::string>& fixtures) {
     if (absolute.empty() || absolute.front() != '/') return probeError("open directory", EINVAL);
     const bool root = geteuid() == 0;
     // Match each scanner's entry path. The ordinary UID may traverse a parent
@@ -260,20 +178,13 @@ std::string inspectDirectory(const std::string& absolute, bool mark, bool exerci
     std::snprintf(type, sizeof(type), "0x%x", static_cast<unsigned>(info.f_type));
     std::string result = std::string(filesystemName(info.f_type)) + " " + type +
                          " · mount " + std::to_string(fdMountId(directory.get())) + " · readable";
-    if (!mark || !root) return result;
-
-    const Fd group(static_cast<int>(syscall(__NR_fanotify_init,
-        FAN_CLOEXEC | FAN_NONBLOCK | FAN_CLASS_NOTIF | FAN_REPORT_FID | FAN_REPORT_DFID_NAME,
-        O_RDONLY | O_CLOEXEC)));
-    if (group.get() < 0) return result + " · " + probeError("fanotify_init", errno);
-    constexpr std::uint64_t mask = FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO;
-    if (syscall(__NR_fanotify_mark, group.get(), FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-                mask, directory.get(), nullptr) != 0) {
-        return result + " · " + probeError("FAN_MARK_FILESYSTEM", errno);
-    }
-    result += " · FAN_MARK_FILESYSTEM + DFID_NAME";
-    return exercise ? result + " · " + exerciseFanotify(group.get(), directory.get())
-                    : result + " · mark only";
+    if (!fixtures || !root) return result;
+    if (static_cast<std::uint32_t>(info.f_type) == fuseMagic) return result + " · inotify (FUSE)";
+    auto fixture = fixtureOnMount(*fixtures, fdMountId(directory.get()));
+    std::string reason;
+    const auto fanotify = rtpath::FanotifyWatch::start(directory.get(), fixture.get(), {}, reason);
+    return result + (fanotify ? " · fanotify verified CREATE DELETE MODIFY CLOSE_WRITE ATTRIB RENAME file+directory"
+                              : " · inotify · " + reason);
 }
 
 std::uint8_t kind(mode_t mode) {
@@ -311,12 +222,15 @@ public:
         if (!identity_) return;
         repair_ = env_->GetMethodID(type, "onRepair", "([BJJJ)V");
         if (!repair_) return;
+        backend_ = env_->GetMethodID(type, "onBackend", "(ZLjava/lang/String;)V");
+        if (!backend_) return;
         gap_ = env_->GetMethodID(type, "onGap", "(Ljava/lang/String;I)V");
         buffer_.reserve(batchSize * 96);
     }
 
     Outcome scan(const std::string& base, const std::string& relative, const std::string& indexDirectory,
-                 std::uint64_t expectedMount, std::uint64_t expectedDevice, std::uint64_t expectedInode) {
+                 std::uint64_t expectedMount, std::uint64_t expectedDevice, std::uint64_t expectedInode,
+                 const std::optional<std::string>& fixtures) {
         if (!gap_ || env_->ExceptionCheck()) return failed;
         if (stopping()) return cancelled;
 
@@ -338,8 +252,8 @@ public:
         }
         if (expectedMount != 0 && (mount_ != expectedMount || rootInfo_.st_dev != expectedDevice ||
                                   rootInfo_.st_ino != expectedInode)) {
-            watch_.gap("inotify scope identity changed", ESTALE);
-            return watchFailed();
+            report(gap_, "scan scope identity changed", ESTALE);
+            return failed;
         }
         env_->CallVoidMethod(receiver_, identity_, static_cast<jlong>(mount_),
             static_cast<jlong>(rootInfo_.st_dev), static_cast<jlong>(rootInfo_.st_ino));
@@ -347,9 +261,25 @@ public:
         struct statfs filesystem {};
         fuse_ = fstatfs(root_.get(), &filesystem) == 0 &&
             static_cast<std::uint32_t>(filesystem.f_type) == fuseMagic;
+        std::string reason;
+        if (fixtures && geteuid() == 0) {
+            if (fuse_) {
+                reason = "FUSE view";
+            } else {
+                auto fixture = fixtureOnMount(*fixtures, mount_);
+                watch_ = rtpath::FanotifyWatch::start(root_.get(), fixture.get(), indexDirectory_, reason);
+            }
+        }
+        const bool fanotify = watch_ != nullptr;
+        if (!watch_) watch_ = std::make_unique<rtpath::InotifyWatch>();
+        const auto message = env_->NewStringUTF(reason.c_str());
+        if (!message) return failed;
+        env_->CallVoidMethod(receiver_, backend_, static_cast<jboolean>(fanotify), message);
+        env_->DeleteLocalRef(message);
+        if (stopping()) return cancelled;
         const auto result = walk(Fd(openat(root_.get(), ".", directoryFlags)), rootInfo_, "");
         if (result != complete) return result;
-        if (watch_.fd() < 0) {
+        if (watch_->fd() < 0) {
             if (!checkpoint(true)) return cancelled;
             return watchFailed();
         }
@@ -358,16 +288,16 @@ public:
         // have been reconciled. Continuous churn can be retried with the old index intact.
         for (int round = 0;; ++round) {
             if (stopping()) return cancelled;
-            const bool drained = watch_.drain();
-            if (watch_.error() != 0) return watchFailed();
+            const bool drained = watch_->drain();
+            if (watch_->error() != 0) return watchFailed();
             if (!checkRoot(base, relative)) return watchFailed();
-            if (drained && !watch_.hasPending()) break;
+            if (drained && !watch_->hasPending()) break;
             if (round == 16) {
-                watch_.gap("inotify baseline did not settle", EBUSY);
+                watch_->gap("watch baseline did not settle", EBUSY);
                 return watchFailed();
             }
-            if (watch_.hasPending() &&
-                (!reconcile() || watch_.error() != 0 || !checkpoint(false))) return interrupted();
+            if (watch_->hasPending() &&
+                (!reconcile() || watch_->error() != 0 || !checkpoint(false))) return interrupted();
         }
         if (!checkpoint(true)) return interrupted();
 
@@ -375,23 +305,23 @@ public:
         auto retryAt = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         std::string previousRetry;
         while (!stopping()) {
-            pollfd ready{watch_.fd(), POLLIN, 0};
-            const int result = poll(&ready, 1, watch_.hasPending() ? 0 : 150);
+            pollfd ready{watch_->fd(), POLLIN, 0};
+            const int result = poll(&ready, 1, watch_->hasPending() ? 0 : 150);
             if (result < 0 && errno == EINTR) continue;
             if (result < 0 || (ready.revents & (POLLERR | POLLHUP | POLLNVAL))) {
-                watch_.gap("poll inotify", result < 0 ? errno : EIO);
+                watch_->gap("poll watch", result < 0 ? errno : EIO);
                 break;
             }
-            if (result > 0 || watch_.hasPending()) {
+            if (result > 0 || watch_->hasPending()) {
                 // Keep both sides of a move and an editor's temporary writes in one commit.
-                watch_.drain();
-                if (watch_.hasPending() && watch_.error() == 0) {
+                watch_->drain();
+                if (watch_->hasPending() && watch_->error() == 0) {
                     poll(nullptr, 0, 25);
-                    watch_.drain();
+                    watch_->drain();
                 }
-                if (watch_.error() != 0 || !checkRoot(base, relative)) break;
-                if (watch_.hasPending()) {
-                    if (!reconcile() || watch_.error() != 0 || !checkRoot(base, relative) ||
+                if (watch_->error() != 0 || !checkRoot(base, relative)) break;
+                if (watch_->hasPending()) {
+                    if (!reconcile() || watch_->error() != 0 || !checkRoot(base, relative) ||
                         !checkpoint(false)) return interrupted();
                 }
             }
@@ -405,7 +335,7 @@ public:
                 retryAt = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             }
         }
-        return watch_.error() != 0 ? watchFailed() : cancelled;
+        return watch_->error() != 0 ? watchFailed() : cancelled;
     }
 
 private:
@@ -429,7 +359,7 @@ private:
         append(0, "", info);
         while (!stack_.empty()) {
             if (stopping()) return cancelled;
-            if (watch_.fd() >= 0 && watch_.error() != 0) return watchFailed();
+            if (watch_->fd() >= 0 && watch_->error() != 0) return watchFailed();
             auto& frame = stack_.back();
             const int parent = dirfd(frame.directory.get());
             errno = 0;
@@ -458,7 +388,7 @@ private:
             }
             scanChild(parent, frame, item->d_name);
             if (pending_ >= batchSize) {
-                if (watch_.fd() >= 0) watch_.drain();
+                if (watch_->fd() >= 0) watch_->drain();
                 if (!flush()) return failed;
             }
         }
@@ -483,20 +413,20 @@ private:
     }
 
     Outcome watchFailed() {
-        report(gap_, watch_.operation(), watch_.error());
+        report(gap_, watch_->operation(), watch_->error());
         return failed;
     }
 
     Outcome interrupted() {
-        if (watch_.error() != 0) return watchFailed();
+        if (watch_->error() != 0) return watchFailed();
         return stopping() ? cancelled : failed;
     }
 
     bool checkpoint(bool baseline) {
         if (stopping()) return false;
         env_->CallVoidMethod(receiver_, checkpoint_, static_cast<jboolean>(baseline), static_cast<jboolean>(fuse_),
-            static_cast<jint>(watch_.registered()), static_cast<jint>(watch_.failures()),
-            static_cast<jint>(watch_.registrationError()), static_cast<jlong>(watch_.sequence()));
+            static_cast<jint>(watch_->registered()), static_cast<jint>(watch_->failures()),
+            static_cast<jint>(watch_->registrationError()), static_cast<jlong>(watch_->sequence()));
         return !env_->ExceptionCheck();
     }
 
@@ -505,7 +435,7 @@ private:
         struct stat info {};
         if (root.get() >= 0 && fstat(root.get(), &info) == 0 &&
             sameFile(info, rootInfo_) && fdMountId(root.get()) == mount_) return true;
-        watch_.gap("inotify scope identity changed", ESTALE);
+        watch_->gap("scan scope identity changed", ESTALE);
         return false;
     }
 
@@ -513,7 +443,7 @@ private:
         Directory stream(fdopendir(directory.get()), closedir);
         if (!stream) return false;
         const bool containsIndexFiles = sameFile(indexDirectory_, info);
-        const bool watched = watch_.fd() >= 0 && watch_.add(path, directory.get(), containsIndexFiles);
+        const bool watched = watch_->fd() >= 0 && watch_->add(path, directory.get(), containsIndexFiles);
         directory.release();
         stack_.push_back({std::move(stream), id, info, std::move(path), watched, containsIndexFiles});
         ++directories_;
@@ -532,7 +462,7 @@ private:
         if (frame.containsIndexFiles && rtpath::isIndexFile(name)) return;
         Metadata metadata;
         const auto retry = [&](const char* operation, int error) {
-            if (frame.watched && disappeared(error)) watch_.dirty(join(frame.path, name));
+            if (frame.watched && disappeared(error)) watch_->dirty(join(frame.path, name));
             else issue(operation, error);
         };
         if (!metadataAt(parent, name, metadata)) {
@@ -570,7 +500,7 @@ private:
     Fd openParent(std::string_view path, bool repairing = false) {
         Fd parent(openat(root_.get(), ".", directoryFlags));
         if (parent.get() < 0) {
-            watch_.gap("reopen inotify scope", errno);
+            watch_->gap("reopen watch scope", errno);
             return parent;
         }
         for (std::size_t start = 0; start < path.size();) {
@@ -578,12 +508,12 @@ private:
             const std::string name(path.substr(start, slash == path.npos ? slash : slash - start));
             Fd child(openat(parent.get(), name.c_str(), directoryFlags));
             if (child.get() < 0) {
-                if (disappeared(errno)) watch_.dirty(std::string(path.substr(0, slash)));
-                else if (!repairing || errno != EACCES) watch_.gap("open inotify parent", errno);
+                if (disappeared(errno)) watch_->dirty(std::string(path.substr(0, slash)));
+                else if (!repairing || errno != EACCES) watch_->gap("open watch parent", errno);
                 return Fd();
             }
             if (fdMountId(child.get()) != mount_) {
-                watch_.gap("inotify mount boundary changed", ESTALE);
+                watch_->gap("watch mount boundary changed", ESTALE);
                 return Fd();
             }
             parent = std::move(child);
@@ -606,40 +536,40 @@ private:
     }
 
     bool retryWatch(std::string& previous, const std::string& base, const std::string& relative) {
-        const auto candidate = watch_.nextFailed(previous);
+        const auto candidate = watch_->nextFailed(previous);
         if (!candidate || stopping()) return true;
         const auto& path = *candidate;
         previous = path;
         if (path.empty()) {
             if (!checkRoot(base, relative)) return false;
-            if (!watch_.add(path, root_.get(), sameFile(indexDirectory_, rootInfo_))) return true;
-            watch_.gap("inotify scope watch restored", ENODATA);
+            if (!watch_->add(path, root_.get(), sameFile(indexDirectory_, rootInfo_))) return true;
+            watch_->gap("inotify scope watch restored", ENODATA);
             return false;
         }
         const auto slash = path.rfind('/');
         const auto parentPath = slash == path.npos ? std::string_view{} : std::string_view(path).substr(0, slash);
         auto parent = openParent(parentPath, true);
-        if (parent.get() < 0) return watch_.error() == 0;
+        if (parent.get() < 0) return watch_->error() == 0;
         const auto* name = path.c_str() + (slash == path.npos ? 0 : slash + 1);
 
         Fd directory(openat(parent.get(), name, directoryFlags));
         if (directory.get() < 0) {
-            if (disappeared(errno)) watch_.dirty(path);
-            return watch_.error() == 0;
+            if (disappeared(errno)) watch_->dirty(path);
+            return watch_->error() == 0;
         }
         struct stat info {};
         if (fstat(directory.get(), &info) != 0) return true;
         if (fdMountId(directory.get()) != mount_) {
-            watch_.gap("inotify entry remounted", ESTALE);
+            watch_->gap("inotify entry remounted", ESTALE);
             return false;
         }
-        if (!watch_.add(path, directory.get(), sameFile(indexDirectory_, info))) return true;
+        if (!watch_->add(path, directory.get(), sameFile(indexDirectory_, info))) return true;
 
         const auto began = std::chrono::steady_clock::now();
-        watch_.forget(path, true);
+        watch_->forget(path, true);
         env_->CallVoidMethod(receiver_, startChanges_);
         if (!emitPath(path, subtree) || walk(std::move(directory), info, path) != complete ||
-            watch_.error() != 0 || !checkRoot(base, relative)) return false;
+            watch_->error() != 0 || !checkRoot(base, relative)) return false;
         const auto value = env_->NewByteArray(static_cast<jsize>(path.size()));
         if (!value) return false;
         env_->SetByteArrayRegion(value, 0, static_cast<jsize>(path.size()), reinterpret_cast<const jbyte*>(path.data()));
@@ -655,12 +585,12 @@ private:
         const auto slash = path.rfind('/');
         const auto base = slash == path.npos ? std::string_view{} : std::string_view(path).substr(0, slash);
         auto parent = openParent(base);
-        if (parent.get() < 0) return watch_.error() == 0;
+        if (parent.get() < 0) return watch_->error() == 0;
         const auto* name = path.empty() ? "." : path.c_str() + (slash == path.npos ? 0 : slash + 1);
         if (rtpath::isIndexFile(name)) {
             struct stat info {};
             if (fstat(parent.get(), &info) != 0) {
-                watch_.gap("read inotify parent metadata", errno);
+                watch_->gap("read watch parent metadata", errno);
                 return false;
             }
             if (sameFile(indexDirectory_, info)) return true;
@@ -669,20 +599,20 @@ private:
         if (!metadataAt(parent.get(), name, current)) {
             const int error = errno;
             if (!disappeared(error)) {
-                watch_.gap("read inotify entry metadata", error);
+                watch_->gap("read watch entry metadata", error);
                 return false;
             }
             if (metadata) return true;
-            watch_.forget(path);
+            watch_->forget(path);
             return emitPath(path, removed);
         }
         if (current.mount != mount_) {
-            watch_.gap("inotify entry remounted", ESTALE);
+            watch_->gap("watch entry remounted", ESTALE);
             return false;
         }
 
         if (metadata || !S_ISDIR(current.info.st_mode)) {
-            if (!metadata) watch_.forget(path);
+            if (!metadata) watch_->forget(path);
             if (!emitPath(path, metadataOnly)) return false;
             entries_ = 0;
             append(0, "", current.info);
@@ -694,22 +624,22 @@ private:
         if (directory.get() < 0 || fstat(directory.get(), &opened) != 0) {
             const int error = errno;
             if (!disappeared(error)) {
-                watch_.gap("open inotify child", error);
+                watch_->gap("open watch child", error);
                 return false;
             }
-            watch_.dirty(path);
+            watch_->dirty(path);
             return true;
         }
         if (!sameFile(opened, current.info) || fdMountId(directory.get()) != mount_) {
-            watch_.dirty(path);
+            watch_->dirty(path);
             return true;
         }
-        watch_.forget(path);
+        watch_->forget(path);
         return emitPath(path, subtree) && walk(std::move(directory), opened, path) == complete;
     }
 
     bool reconcile() {
-        const auto paths = watch_.takePending();
+        const auto paths = watch_->takePending();
         std::set<std::string> parents;
         env_->CallVoidMethod(receiver_, startChanges_);
         for (const auto& path : paths) {
@@ -722,6 +652,10 @@ private:
                 }
             }
             if (covered) continue;
+            if (path.empty()) {
+                parents.insert(path);
+                continue;
+            }
             if (!refresh(path, false)) return false;
             const auto slash = path.rfind('/');
             parents.insert(slash == path.npos ? "" : path.substr(0, slash));
@@ -779,6 +713,7 @@ private:
     jmethodID identity_ = nullptr;
     jmethodID repair_ = nullptr;
     jmethodID gap_ = nullptr;
+    jmethodID backend_ = nullptr;
     std::vector<jbyte> buffer_;
     std::vector<Frame> stack_;
     std::size_t pending_ = 0;
@@ -790,7 +725,7 @@ private:
     Fd root_;
     struct stat rootInfo_ {};
     struct stat indexDirectory_ {};
-    rtpath::InotifyWatch watch_;
+    std::unique_ptr<rtpath::ChangeWatch> watch_;
 };
 
 }  // namespace
@@ -798,7 +733,7 @@ private:
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
     JNIEnv* env, jobject, jbyteArray basePath, jbyteArray relativePath, jbyteArray indexDirectoryPath,
-    jlong expectedMount, jlong expectedDevice, jlong expectedInode, jobject receiver
+    jlong expectedMount, jlong expectedDevice, jlong expectedInode, jbyteArray fixturePaths, jobject receiver
 ) {
     try {
         const auto base = bytes(env, basePath);
@@ -807,7 +742,10 @@ Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
         if (env->ExceptionCheck()) return failed;
         const auto indexDirectory = bytes(env, indexDirectoryPath);
         if (env->ExceptionCheck()) return failed;
-        return Scanner(env, receiver).scan(base, relative, indexDirectory, expectedMount, expectedDevice, expectedInode);
+        const auto fixtures = fixturePaths ? std::optional(bytes(env, fixturePaths)) : std::nullopt;
+        if (env->ExceptionCheck()) return failed;
+        return Scanner(env, receiver).scan(base, relative, indexDirectory,
+            expectedMount, expectedDevice, expectedInode, fixtures);
     } catch (const std::bad_alloc&) {
         const auto exception = env->FindClass("java/lang/OutOfMemoryError");
         if (exception) env->ThrowNew(exception, "Could not allocate native scanner memory");
@@ -817,12 +755,14 @@ Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_eltancex_rtpath_scan_NativeScanner_inspectDirectory(
-    JNIEnv* env, jobject, jbyteArray absolutePath, jboolean mark, jboolean exercise
+    JNIEnv* env, jobject, jbyteArray absolutePath, jbyteArray fixturePaths
 ) {
     try {
         const auto absolute = bytes(env, absolutePath);
         if (env->ExceptionCheck()) return nullptr;
-        const auto result = inspectDirectory(absolute, mark, exercise);
+        const auto fixtures = fixturePaths ? std::optional(bytes(env, fixturePaths)) : std::nullopt;
+        if (env->ExceptionCheck()) return nullptr;
+        const auto result = inspectDirectory(absolute, fixtures);
         return env->NewStringUTF(result.c_str());
     } catch (const std::bad_alloc&) {
         const auto exception = env->FindClass("java/lang/OutOfMemoryError");

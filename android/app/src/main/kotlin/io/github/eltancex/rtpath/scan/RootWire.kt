@@ -14,8 +14,8 @@ internal fun rootScope(path: String): ScanScope {
 }
 
 internal object RootWire {
-    const val VERSION = 3
-    private const val magic = 0x52545033
+    const val VERSION = 4
+    private const val magic = 0x52545034
     private const val batchFrame = 1
     private const val problemFrame = 2
     private const val endFrame = 3
@@ -25,6 +25,7 @@ internal object RootWire {
     private const val gapFrame = 7
     private const val identityFrame = 8
     private const val repairFrame = 9
+    private const val backendFrame = 10
     private const val maxBatch = 512 * (35 + 255)
     private const val maxPath = 513 * 256
 
@@ -45,6 +46,12 @@ internal object RootWire {
         output.writeByte(problemFrame)
         output.writeUTF(operation)
         output.writeInt(error)
+    }
+
+    fun writeBackend(output: DataOutputStream, fanotify: Boolean, reason: String) {
+        output.writeByte(backendFrame)
+        output.writeBoolean(fanotify)
+        output.writeUTF(reason)
     }
 
     fun writeEnd(output: DataOutputStream, outcome: Int) {
@@ -120,6 +127,7 @@ internal object RootWire {
                     receiver.onBatch(ByteArray(size).also { input.readFully(it) })
                 }
                 problemFrame -> receiver.onProblem(input.readUTF(), input.readInt())
+                backendFrame -> receiver.onBackend(input.readBoolean(), input.readUTF())
                 changesFrame -> receiver.onChanges()
                 pathFrame -> {
                     val change = input.readUnsignedByte()
