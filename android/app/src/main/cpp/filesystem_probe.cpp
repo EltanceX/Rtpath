@@ -1,3 +1,5 @@
+#include "fd.h"
+
 #include <jni.h>
 
 #include <array>
@@ -30,19 +32,7 @@ constexpr char kAbi[] = "x86_64";
 #error Unexpected RtPath ABI
 #endif
 
-class Fd {
-public:
-    explicit Fd(int fd) : fd_(fd) {}
-    ~Fd() {
-        if (fd_ >= 0) close(fd_);
-    }
-    Fd(const Fd&) = delete;
-    Fd& operator=(const Fd&) = delete;
-    int get() const { return fd_; }
-
-private:
-    int fd_;
-};
+using rtpath::Fd;
 
 std::string systemError(const char* operation, int error = errno) {
     return std::string(operation) + ": " + std::strerror(error);

@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:rtpath/capabilities.dart';
@@ -9,7 +10,7 @@ void main() {
   testWidgets('probes real Android capabilities as the app UID', (
     tester,
   ) async {
-    app.main();
+    await tester.pumpWidget(const MaterialApp(home: app.CapabilityPage()));
     final report = await inspectCapabilities();
     await tester.pumpAndSettle();
     expect(find.text('RtPath 能力检测'), findsOneWidget);

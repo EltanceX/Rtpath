@@ -24,6 +24,14 @@ android {
         }
     }
 
+    buildTypes {
+        debug {
+            if (providers.gradleProperty("rtpathTestHost").orNull == "true") {
+                applicationIdSuffix = ".testhost"
+            }
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")

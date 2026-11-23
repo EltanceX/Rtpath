@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'capabilities.dart';
+import 'search_page.dart';
 
 void main() {
   runApp(const RtPathApp());
@@ -18,7 +19,7 @@ class RtPathApp extends StatelessWidget {
         colorSchemeSeed: Colors.indigo,
         brightness: Brightness.dark,
       ),
-      home: const CapabilityPage(),
+      home: const SearchScreen(diagnostics: CapabilityPage()),
     );
   }
 }

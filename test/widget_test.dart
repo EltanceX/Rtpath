@@ -35,7 +35,7 @@ void main() {
     });
     addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
-    await tester.pumpWidget(const RtPathApp());
+    await tester.pumpWidget(const MaterialApp(home: CapabilityPage()));
     await tester.pumpAndSettle();
 
     expect(find.text('Android 16 · API 36'), findsOneWidget);
