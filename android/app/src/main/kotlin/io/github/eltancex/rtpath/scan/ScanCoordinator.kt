@@ -21,8 +21,12 @@ internal class ScanCoordinator private constructor(context: Context) {
         return store.indexes().filter { it.isAvailable(current) }.map { it.index }
     }
 
-    fun search(scopeId: String, text: String): SearchPage? =
-        store.search(scopeId, text, locations.list())
+    fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?): SearchPage? =
+        try {
+            store.search(scopeId, text, order, descending, cursor, locations.list())
+        } catch (error: IllegalArgumentException) {
+            throw FlutterError("invalid_query", error.message)
+        }
 
     fun status(): ScanStatus? = synchronized(lock) { latest }
 

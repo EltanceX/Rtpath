@@ -2,6 +2,8 @@ package io.github.eltancex.rtpath
 
 import io.github.eltancex.rtpath.scan.ScanApi
 import io.github.eltancex.rtpath.scan.ScanCoordinator
+import io.github.eltancex.rtpath.scan.SearchCursor
+import io.github.eltancex.rtpath.scan.SearchOrder
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,7 +24,8 @@ class MainActivity : FlutterActivity() {
             override fun startScan(locationId: String, relativePath: String) = scans.start(locationId, relativePath)
             override fun status() = scans.status()
             override fun cancelScan(taskId: String) = scans.cancel(taskId)
-            override fun search(scopeId: String, text: String) = scans.search(scopeId, text)
+            override fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?) =
+                scans.search(scopeId, text, order, descending, cursor)
         })
         capabilitiesChannel = MethodChannel(
             messenger,

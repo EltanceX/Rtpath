@@ -82,16 +82,42 @@ class SearchEntry {
   int? bytes;
 }
 
-class SearchPage {
-  SearchPage({
+enum SearchOrder { name, path, size, modified }
+
+class SearchCursor {
+  SearchCursor({
     required this.generation,
-    required this.entries,
-    required this.hasMore,
+    required this.revision,
+    required this.queryKey,
+    required this.id,
+    required this.scanCandidates,
+    this.textKey,
+    this.numberKey,
   });
 
   String generation;
+  int revision;
+  String queryKey;
+  int id;
+  bool scanCandidates;
+  String? textKey;
+  int? numberKey;
+}
+
+class SearchPage {
+  SearchPage({
+    required this.generation,
+    required this.revision,
+    required this.entries,
+    required this.reset,
+    this.next,
+  });
+
+  String generation;
+  int revision;
   List<SearchEntry> entries;
-  bool hasMore;
+  bool reset;
+  SearchCursor? next;
 }
 
 @HostApi()
@@ -114,5 +140,11 @@ abstract class ScanApi {
   bool cancelScan(String taskId);
 
   @TaskQueue(type: TaskQueueType.serialBackgroundThread)
-  SearchPage? search(String scopeId, String text);
+  SearchPage? search(
+    String scopeId,
+    String text,
+    SearchOrder order,
+    bool descending,
+    SearchCursor? cursor,
+  );
 }

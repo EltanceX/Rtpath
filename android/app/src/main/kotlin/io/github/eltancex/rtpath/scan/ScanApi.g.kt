@@ -224,6 +224,21 @@ enum class EntryKind(val raw: Int) {
   }
 }
 
+enum class SearchOrder(val raw: Int) {
+  NAME(0),
+  PATH(1),
+  SIZE(2),
+  MODIFIED(3);
+
+  companion object {
+    private val pigeonValues = values()
+
+    fun ofRaw(raw: Int): SearchOrder? {
+      return pigeonValues.getOrNull(raw)
+    }
+  }
+}
+
 /** Generated class from Pigeon that represents data sent in messages. */
 data class ScanLocation (
   val id: String,
@@ -449,25 +464,92 @@ data class SearchEntry (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
-data class SearchPage (
+data class SearchCursor (
   val generation: String,
-  val entries: List<SearchEntry>,
-  val hasMore: Boolean
+  val revision: Long,
+  val queryKey: String,
+  val id: Long,
+  val scanCandidates: Boolean,
+  val textKey: String? = null,
+  val numberKey: Long? = null
 )
  {
   companion object {
-    fun fromList(pigeonVar_list: List<Any?>): SearchPage {
+    fun fromList(pigeonVar_list: List<Any?>): SearchCursor {
       val generation = pigeonVar_list[0] as String
-      val entries = pigeonVar_list[1] as List<SearchEntry>
-      val hasMore = pigeonVar_list[2] as Boolean
-      return SearchPage(generation, entries, hasMore)
+      val revision = pigeonVar_list[1] as Long
+      val queryKey = pigeonVar_list[2] as String
+      val id = pigeonVar_list[3] as Long
+      val scanCandidates = pigeonVar_list[4] as Boolean
+      val textKey = pigeonVar_list[5] as String?
+      val numberKey = pigeonVar_list[6] as Long?
+      return SearchCursor(generation, revision, queryKey, id, scanCandidates, textKey, numberKey)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
       generation,
+      revision,
+      queryKey,
+      id,
+      scanCandidates,
+      textKey,
+      numberKey,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as SearchCursor
+    return ScanApiPigeonUtils.deepEquals(this.generation, other.generation) && ScanApiPigeonUtils.deepEquals(this.revision, other.revision) && ScanApiPigeonUtils.deepEquals(this.queryKey, other.queryKey) && ScanApiPigeonUtils.deepEquals(this.id, other.id) && ScanApiPigeonUtils.deepEquals(this.scanCandidates, other.scanCandidates) && ScanApiPigeonUtils.deepEquals(this.textKey, other.textKey) && ScanApiPigeonUtils.deepEquals(this.numberKey, other.numberKey)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.generation)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.revision)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.queryKey)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.id)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.scanCandidates)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.textKey)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.numberKey)
+    return result
+  }
+  override fun toString(): String {
+    return "SearchCursor(generation=$generation, revision=$revision, queryKey=$queryKey, id=$id, scanCandidates=$scanCandidates, textKey=$textKey, numberKey=$numberKey)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
+data class SearchPage (
+  val generation: String,
+  val revision: Long,
+  val entries: List<SearchEntry>,
+  val reset: Boolean,
+  val next: SearchCursor? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): SearchPage {
+      val generation = pigeonVar_list[0] as String
+      val revision = pigeonVar_list[1] as Long
+      val entries = pigeonVar_list[2] as List<SearchEntry>
+      val reset = pigeonVar_list[3] as Boolean
+      val next = pigeonVar_list[4] as SearchCursor?
+      return SearchPage(generation, revision, entries, reset, next)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      generation,
+      revision,
       entries,
-      hasMore,
+      reset,
+      next,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -478,18 +560,20 @@ data class SearchPage (
       return true
     }
     val other = other as SearchPage
-    return ScanApiPigeonUtils.deepEquals(this.generation, other.generation) && ScanApiPigeonUtils.deepEquals(this.entries, other.entries) && ScanApiPigeonUtils.deepEquals(this.hasMore, other.hasMore)
+    return ScanApiPigeonUtils.deepEquals(this.generation, other.generation) && ScanApiPigeonUtils.deepEquals(this.revision, other.revision) && ScanApiPigeonUtils.deepEquals(this.entries, other.entries) && ScanApiPigeonUtils.deepEquals(this.reset, other.reset) && ScanApiPigeonUtils.deepEquals(this.next, other.next)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.generation)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.revision)
     result = 31 * result + ScanApiPigeonUtils.deepHash(this.entries)
-    result = 31 * result + ScanApiPigeonUtils.deepHash(this.hasMore)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.reset)
+    result = 31 * result + ScanApiPigeonUtils.deepHash(this.next)
     return result
   }
   override fun toString(): String {
-    return "SearchPage(generation=$generation, entries=$entries, hasMore=$hasMore)"
+    return "SearchPage(generation=$generation, revision=$revision, entries=$entries, reset=$reset, next=$next)"
   }
 }
 private open class ScanApiPigeonCodec : StandardMessageCodec() {
@@ -506,26 +590,36 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
         }
       }
       131.toByte() -> {
-        (readValue(buffer) as? List<Any?>)?.let {
-          ScanLocation.fromList(it)
+        (readValue(buffer) as Long?)?.let {
+          SearchOrder.ofRaw(it.toInt())
         }
       }
       132.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ScanStatus.fromList(it)
+          ScanLocation.fromList(it)
         }
       }
       133.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          PublishedIndex.fromList(it)
+          ScanStatus.fromList(it)
         }
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchEntry.fromList(it)
+          PublishedIndex.fromList(it)
         }
       }
       135.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchEntry.fromList(it)
+        }
+      }
+      136.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          SearchCursor.fromList(it)
+        }
+      }
+      137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           SearchPage.fromList(it)
         }
@@ -543,24 +637,32 @@ private open class ScanApiPigeonCodec : StandardMessageCodec() {
         stream.write(130)
         writeValue(stream, value.raw.toLong())
       }
-      is ScanLocation -> {
+      is SearchOrder -> {
         stream.write(131)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is ScanStatus -> {
+      is ScanLocation -> {
         stream.write(132)
         writeValue(stream, value.toList())
       }
-      is PublishedIndex -> {
+      is ScanStatus -> {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is SearchEntry -> {
+      is PublishedIndex -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchEntry -> {
         stream.write(135)
+        writeValue(stream, value.toList())
+      }
+      is SearchCursor -> {
+        stream.write(136)
+        writeValue(stream, value.toList())
+      }
+      is SearchPage -> {
+        stream.write(137)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -576,7 +678,7 @@ interface ScanApi {
   fun startScan(locationId: String, relativePath: String): ScanStatus
   fun status(): ScanStatus?
   fun cancelScan(taskId: String): Boolean
-  fun search(scopeId: String, text: String): SearchPage?
+  fun search(scopeId: String, text: String, order: SearchOrder, descending: Boolean, cursor: SearchCursor?): SearchPage?
 
   companion object {
     /** The codec used by ScanApi. */
@@ -691,8 +793,11 @@ interface ScanApi {
             val args = message as List<Any?>
             val scopeIdArg = args[0] as String
             val textArg = args[1] as String
+            val orderArg = args[2] as SearchOrder
+            val descendingArg = args[3] as Boolean
+            val cursorArg = args[4] as SearchCursor?
             val wrapped: List<Any?> = try {
-              listOf(api.search(scopeIdArg, textArg))
+              listOf(api.search(scopeIdArg, textArg, orderArg, descendingArg, cursorArg))
             } catch (exception: Throwable) {
               ScanApiPigeonUtils.wrapError(exception)
             }

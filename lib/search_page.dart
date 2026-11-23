@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'platform/scan_api.g.dart';
+import 'search_results.dart';
 
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key, required this.diagnostics});
@@ -19,10 +20,16 @@ class _SearchScreenState extends State<SearchScreen>
   final _api = ScanApi();
   final _relative = TextEditingController();
   final _query = TextEditingController();
+  final _scroll = ScrollController();
+  final _items = <SearchEntry>[];
   List<ScanLocation> _locations = [];
   List<PublishedIndex> _indexes = [];
   ScanStatus? _status;
-  SearchPage? _results;
+  SearchCursor? _next;
+  SearchOrder _order = SearchOrder.name;
+  bool _descending = false;
+  bool _fetching = false;
+  bool _waitingForInput = false;
   String? _locationId;
   String? _scopeId;
   String? _error;
@@ -46,6 +53,7 @@ class _SearchScreenState extends State<SearchScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scroll.addListener(_prefetch);
     unawaited(_restore());
   }
 
@@ -53,7 +61,8 @@ class _SearchScreenState extends State<SearchScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       ++_searchRequest;
-      setState(() => _results = null);
+      _debounce?.cancel();
+      setState(_clearResults);
       unawaited(_refresh());
     }
   }
@@ -65,6 +74,7 @@ class _SearchScreenState extends State<SearchScreen>
     _debounce?.cancel();
     _relative.dispose();
     _query.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -104,22 +114,77 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _search() async {
     _debounce?.cancel();
     final request = ++_searchRequest;
+    setState(_clearResults);
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+    await _fetch(request, null);
+  }
+
+  void _clearResults() {
+    _items.clear();
+    _next = null;
+    _searchError = null;
+    _fetching = false;
+    _waitingForInput = false;
+  }
+
+  Future<void> _fetch(int request, SearchCursor? cursor) async {
     final scope = _scopeId;
+    if (scope == null || _fetching) return;
+    final text = _query.text;
+    final order = _order;
+    final descending = _descending;
     setState(() {
-      _results = null;
+      _fetching = true;
       _searchError = null;
     });
-    if (scope == null) return;
     try {
-      final page = await _api.search(scope, _query.text);
-      if (!mounted || request != _searchRequest) return;
-      setState(() {
-        _results = page;
-        if (page == null) _searchError = '该索引范围当前不可用';
-      });
+      var position = cursor;
+      while (mounted && request == _searchRequest) {
+        final page = await _api.search(
+          scope,
+          text,
+          order,
+          descending,
+          position,
+        );
+        if (!mounted || request != _searchRequest) return;
+        if (page == null) {
+          setState(() {
+            _items.clear();
+            _next = null;
+            _searchError = '该索引范围当前不可用';
+          });
+          return;
+        }
+        if (page.reset) {
+          await _search();
+          return;
+        }
+        setState(() {
+          _items.addAll(page.entries);
+          _next = page.next;
+        });
+        if (page.entries.isNotEmpty || page.next == null) return;
+        position = page.next;
+        await Future<void>.delayed(Duration.zero);
+      }
     } catch (error) {
       if (!mounted || request != _searchRequest) return;
       setState(() => _searchError = _message(error));
+    } finally {
+      if (mounted && request == _searchRequest) {
+        setState(() => _fetching = false);
+      }
+    }
+  }
+
+  void _prefetch() {
+    if (_next != null &&
+        !_fetching &&
+        _searchError == null &&
+        _scroll.position.extentAfter < 480 &&
+        _scroll.position.pixels > 0) {
+      unawaited(_fetch(_searchRequest, _next));
     }
   }
 
@@ -127,8 +192,8 @@ class _SearchScreenState extends State<SearchScreen>
     _debounce?.cancel();
     ++_searchRequest;
     setState(() {
-      _results = null;
-      _searchError = null;
+      _clearResults();
+      _waitingForInput = true;
     });
     _debounce = Timer(const Duration(milliseconds: 200), _search);
   }
@@ -221,8 +286,6 @@ class _SearchScreenState extends State<SearchScreen>
 
   @override
   Widget build(BuildContext context) {
-    final results = _results;
-    final items = results?.entries ?? const <SearchEntry>[];
     final controls = [
       if (_configuring && _locations.isNotEmpty) ...[
         _scanControls(),
@@ -264,29 +327,6 @@ class _SearchScreenState extends State<SearchScreen>
             unawaited(_search());
           },
         ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _query,
-          decoration: const InputDecoration(
-            labelText: '搜索文件名',
-            prefixIcon: Icon(Icons.search),
-            border: OutlineInputBorder(),
-          ),
-          textInputAction: TextInputAction.search,
-          onChanged: _queryChanged,
-          onSubmitted: (_) => unawaited(_search()),
-        ),
-        const SizedBox(height: 12),
-        if (_searchError case final error?)
-          Text(error)
-        else if (results == null)
-          const LinearProgressIndicator()
-        else if (items.isEmpty)
-          const Text('没有匹配的文件或目录')
-        else
-          Text(
-            results.hasMore ? '显示前 ${items.length} 条' : '${items.length} 条结果',
-          ),
       ] else if (!_loading && _error == null)
         const Text('扫描一个目录以建立索引。'),
     ];
@@ -315,38 +355,145 @@ class _SearchScreenState extends State<SearchScreen>
       ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 800),
-          child: ListView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          constraints: const BoxConstraints(maxWidth: 1280),
+          child: CustomScrollView(
+            controller: _scroll,
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            itemCount: controls.length + items.length,
-            itemBuilder: (context, index) {
-              if (index < controls.length) return controls[index];
-              final entry = items[index - controls.length];
-              return ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(switch (entry.kind) {
-                  EntryKind.directory => Icons.folder_outlined,
-                  EntryKind.symlink => Icons.link,
-                  _ => Icons.insert_drive_file_outlined,
-                }),
-                title: Text(entry.name),
-                subtitle: Text(
-                  entry.path,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                sliver: SliverList.list(children: controls),
+              ),
+              if (_indexes.isNotEmpty)
+                PinnedHeaderSliver(child: _searchToolbar(context)),
+              if (_items.isNotEmpty)
+                SliverPadding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  sliver: SliverList.builder(
+                    itemCount: _items.length,
+                    itemBuilder: (context, index) => SearchResultRow(
+                      entry: _items[index],
+                      onCopy: _copyPath,
+                    ),
+                  ),
                 ),
-                trailing: IconButton(
-                  tooltip: '复制路径',
-                  onPressed: () => _copyPath(entry.path),
-                  icon: const Icon(Icons.copy),
+              if (_indexes.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                    child: _searchFooter(),
+                  ),
                 ),
-              );
-            },
+            ],
           ),
         ),
       ),
     );
+  }
+
+  Widget _searchToolbar(BuildContext context) => Material(
+    color: Theme.of(context).colorScheme.surface,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _query,
+                  decoration: const InputDecoration(
+                    labelText: '搜索文件名',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
+                  ),
+                  textInputAction: TextInputAction.search,
+                  onChanged: _queryChanged,
+                  onSubmitted: (_) => unawaited(_search()),
+                ),
+              ),
+              IconButton(
+                tooltip: '搜索语法',
+                icon: const Icon(Icons.help_outline),
+                onPressed: () => showSearchHelp(context),
+              ),
+              PopupMenuButton<SearchOrder>(
+                tooltip: '排序 · ${_order.label}',
+                icon: const Icon(Icons.sort),
+                onSelected: (order) {
+                  if (_order == order) return;
+                  setState(() {
+                    _order = order;
+                    _descending = false;
+                  });
+                  unawaited(_search());
+                },
+                itemBuilder: (context) => [
+                  for (final order in SearchOrder.values)
+                    CheckedPopupMenuItem(
+                      value: order,
+                      checked: order == _order,
+                      child: Text(order.label),
+                    ),
+                ],
+              ),
+              IconButton(
+                tooltip: _descending ? '改为升序' : '改为降序',
+                icon: Icon(
+                  _descending ? Icons.arrow_downward : Icons.arrow_upward,
+                ),
+                onPressed: () {
+                  setState(() => _descending = !_descending);
+                  unawaited(_search());
+                },
+              ),
+            ],
+          ),
+          if (_items.isNotEmpty)
+            SearchResultHeader(
+              order: _order,
+              descending: _descending,
+              onSort: (order) {
+                setState(() {
+                  _descending = _order == order && !_descending;
+                  _order = order;
+                });
+                unawaited(_search());
+              },
+            )
+          else
+            const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+
+  Widget _searchFooter() {
+    if (_fetching || _waitingForInput) return const LinearProgressIndicator();
+    if (_searchError case final error?) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(error),
+          if (_next != null)
+            TextButton(
+              onPressed: () => _fetch(_searchRequest, _next),
+              child: const Text('重试加载'),
+            ),
+        ],
+      );
+    }
+    if (_next != null) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton(
+          onPressed: () => _fetch(_searchRequest, _next),
+          child: const Text('加载更多'),
+        ),
+      );
+    }
+    return Text(_items.isEmpty ? '没有匹配的文件或目录' : '${_items.length} 条结果');
   }
 
   Widget _scanControls() {

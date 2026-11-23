@@ -3,6 +3,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val rtpathTestHost = providers.gradleProperty("rtpathTestHost").orNull == "true"
+
 android {
     namespace = "io.github.eltancex.rtpath"
     compileSdk = 36
@@ -24,10 +26,14 @@ android {
         }
     }
 
-    buildTypes {
-        debug {
-            if (providers.gradleProperty("rtpathTestHost").orNull == "true") {
-                applicationIdSuffix = ".testhost"
+    if (rtpathTestHost) {
+        buildTypes.configureEach {
+            if (name == "debug" || name == "profile") applicationIdSuffix = ".testhost"
+        }
+        sourceSets {
+            getByName("main").java.srcDir("src/testhost/kotlin")
+            for (buildType in listOf("debug", "profile")) {
+                maybeCreate(buildType).manifest.srcFile("src/testhost/AndroidManifest.xml")
             }
         }
     }

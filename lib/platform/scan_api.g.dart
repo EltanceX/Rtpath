@@ -101,6 +101,8 @@ enum ScanState { running, cancelling, completed, partial, cancelled, failed }
 
 enum EntryKind { file, directory, symlink, other }
 
+enum SearchOrder { name, path, size, modified }
+
 class ScanLocation {
   ScanLocation({
     required this.id,
@@ -381,21 +383,109 @@ class SearchEntry {
   }
 }
 
-class SearchPage {
-  SearchPage({
+class SearchCursor {
+  SearchCursor({
     required this.generation,
-    required this.entries,
-    required this.hasMore,
+    required this.revision,
+    required this.queryKey,
+    required this.id,
+    required this.scanCandidates,
+    this.textKey,
+    this.numberKey,
   });
 
   String generation;
 
-  List<SearchEntry> entries;
+  int revision;
 
-  bool hasMore;
+  String queryKey;
+
+  int id;
+
+  bool scanCandidates;
+
+  String? textKey;
+
+  int? numberKey;
 
   List<Object?> _toList() {
-    return <Object?>[generation, entries, hasMore];
+    return <Object?>[
+      generation,
+      revision,
+      queryKey,
+      id,
+      scanCandidates,
+      textKey,
+      numberKey,
+    ];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static SearchCursor decode(Object result) {
+    result as List<Object?>;
+    return SearchCursor(
+      generation: result[0]! as String,
+      revision: result[1]! as int,
+      queryKey: result[2]! as String,
+      id: result[3]! as int,
+      scanCandidates: result[4]! as bool,
+      textKey: result[5] as String?,
+      numberKey: result[6] as int?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! SearchCursor || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(generation, other.generation) &&
+        _deepEquals(revision, other.revision) &&
+        _deepEquals(queryKey, other.queryKey) &&
+        _deepEquals(id, other.id) &&
+        _deepEquals(scanCandidates, other.scanCandidates) &&
+        _deepEquals(textKey, other.textKey) &&
+        _deepEquals(numberKey, other.numberKey);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'SearchCursor(generation: $generation, revision: $revision, queryKey: $queryKey, id: $id, scanCandidates: $scanCandidates, textKey: $textKey, numberKey: $numberKey)';
+  }
+}
+
+class SearchPage {
+  SearchPage({
+    required this.generation,
+    required this.revision,
+    required this.entries,
+    required this.reset,
+    this.next,
+  });
+
+  String generation;
+
+  int revision;
+
+  List<SearchEntry> entries;
+
+  bool reset;
+
+  SearchCursor? next;
+
+  List<Object?> _toList() {
+    return <Object?>[generation, revision, entries, reset, next];
   }
 
   Object encode() {
@@ -406,8 +496,10 @@ class SearchPage {
     result as List<Object?>;
     return SearchPage(
       generation: result[0]! as String,
-      entries: (result[1]! as List<Object?>).cast<SearchEntry>(),
-      hasMore: result[2]! as bool,
+      revision: result[1]! as int,
+      entries: (result[2]! as List<Object?>).cast<SearchEntry>(),
+      reset: result[3]! as bool,
+      next: result[4] as SearchCursor?,
     );
   }
 
@@ -421,8 +513,10 @@ class SearchPage {
       return true;
     }
     return _deepEquals(generation, other.generation) &&
+        _deepEquals(revision, other.revision) &&
         _deepEquals(entries, other.entries) &&
-        _deepEquals(hasMore, other.hasMore);
+        _deepEquals(reset, other.reset) &&
+        _deepEquals(next, other.next);
   }
 
   @override
@@ -431,7 +525,7 @@ class SearchPage {
 
   @override
   String toString() {
-    return 'SearchPage(generation: $generation, entries: $entries, hasMore: $hasMore)';
+    return 'SearchPage(generation: $generation, revision: $revision, entries: $entries, reset: $reset, next: $next)';
   }
 }
 
@@ -448,20 +542,26 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is EntryKind) {
       buffer.putUint8(130);
       writeValue(buffer, value.index);
-    } else if (value is ScanLocation) {
+    } else if (value is SearchOrder) {
       buffer.putUint8(131);
-      writeValue(buffer, value.encode());
-    } else if (value is ScanStatus) {
+      writeValue(buffer, value.index);
+    } else if (value is ScanLocation) {
       buffer.putUint8(132);
       writeValue(buffer, value.encode());
-    } else if (value is PublishedIndex) {
+    } else if (value is ScanStatus) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    } else if (value is SearchEntry) {
+    } else if (value is PublishedIndex) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    } else if (value is SearchPage) {
+    } else if (value is SearchEntry) {
       buffer.putUint8(135);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchCursor) {
+      buffer.putUint8(136);
+      writeValue(buffer, value.encode());
+    } else if (value is SearchPage) {
+      buffer.putUint8(137);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -478,14 +578,19 @@ class _PigeonCodec extends StandardMessageCodec {
         final value = readValue(buffer) as int?;
         return value == null ? null : EntryKind.values[value];
       case 131:
-        return ScanLocation.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : SearchOrder.values[value];
       case 132:
-        return ScanStatus.decode(readValue(buffer)!);
+        return ScanLocation.decode(readValue(buffer)!);
       case 133:
-        return PublishedIndex.decode(readValue(buffer)!);
+        return ScanStatus.decode(readValue(buffer)!);
       case 134:
-        return SearchEntry.decode(readValue(buffer)!);
+        return PublishedIndex.decode(readValue(buffer)!);
       case 135:
+        return SearchEntry.decode(readValue(buffer)!);
+      case 136:
+        return SearchCursor.decode(readValue(buffer)!);
+      case 137:
         return SearchPage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -619,7 +724,13 @@ class ScanApi {
     return pigeonVar_replyValue! as bool;
   }
 
-  Future<SearchPage?> search(String scopeId, String text) async {
+  Future<SearchPage?> search(
+    String scopeId,
+    String text,
+    SearchOrder order,
+    bool descending,
+    SearchCursor? cursor,
+  ) async {
     final pigeonVar_channelName =
         'dev.flutter.pigeon.rtpath.ScanApi.search$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
@@ -628,7 +739,7 @@ class ScanApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
-      <Object?>[scopeId, text],
+      <Object?>[scopeId, text, order, descending, cursor],
     );
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(

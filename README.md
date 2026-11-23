@@ -6,7 +6,9 @@ RtPath 是面向开发者的 Android 文件搜索项目，采用 Flutter、Kotli
 
 在首页打开扫描设置，选择应用自有目录或共享存储。相对目录留空时扫描所选位置，填写 `Download` 等相对路径可限定扫描范围。共享存储的授权入口位于扫描设置内。
 
-扫描结束后选择索引范围，输入文件名的一部分。搜索支持中文与字面标点，也可复制结果的完整路径。重扫期间可以继续搜索上次发布的索引。文件发生变化后，可手动扫描相同范围来更新索引。
+扫描结束后选择索引范围，输入文件名的一部分。可组合 `name:"Main Activity.kt"`（完整名称）、`prefix:Main`（前缀）、`ext:kt`、`path:"src/Feature A"` 和 `size:>=1MiB` 中适用的条件。名称匹配支持中文和字面标点。搜索框旁的语法按钮列出了各个条件的写法。
+
+按名称、路径、大小或修改时间排序，滚动至下方继续加载。每条结果显示类型和元数据，并可复制完整路径。重扫期间可以继续查询上次发布的索引。文件发生变化后，可手动扫描相同范围来更新索引。
 
 ## 在 Windows 上构建并安装
 
@@ -42,6 +44,12 @@ flutter test
 ./tools/verify-ordinary-scan.ps1 -Serial '<device-id>' -Shared
 ```
 
-脚本通过 `su` 安装独立的 `.testhost` 包并运行两轮测试。Android 11+ 可用 `-Shared` 验证共享存储，第二轮会撤销测试包所获授权并检查索引可见性。省略该参数可单测应用内部目录。本机额外验证产物可放在 `.local/`。
+脚本通过 `su` 安装独立的 `.testhost` 包并运行两轮测试，验证扫描、查询、滚动和索引重启。Android 11+ 可用 `-Shared` 验证共享存储，第二轮会撤销测试包所获授权并检查索引可见性。省略该参数可单测应用内部目录。
 
-[阶段 1 验证记录](docs/phase1-baseline.md) · [阶段 0 验证记录](docs/phase0-baseline.md) · [首版实现步骤](docs/v1-implementation-steps.md) · [首版设计](docs/v1-design.md)
+在 arm64 真机比较 10 万和 100 万条的 SQLite 与内存查询，可运行以下命令。脚本将原始结果写入 `.local/artifacts/phase2-performance.txt`。
+
+```powershell
+./tools/verify-search-performance.ps1 -Serial '<device-id>'
+```
+
+[阶段 2 搜索验证与性能](docs/phase2-search.md) · [阶段 1 验证记录](docs/phase1-baseline.md) · [阶段 0 验证记录](docs/phase0-baseline.md) · [首版实现步骤](docs/v1-implementation-steps.md) · [首版设计](docs/v1-design.md)
