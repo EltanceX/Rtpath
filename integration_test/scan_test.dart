@@ -156,9 +156,17 @@ void main() {
         'seed',
         (it) => it.entries.isEmpty,
       );
-      final bulk = await Directory('${fixture.path}/bulk').create();
-      for (var i = 0; i < 24000; i++) {
-        File('${bulk.path}/entry-$i').createSync();
+      // Stage the large tree outside the watched scope so the cancellation
+      // fixture does not inadvertently trigger overflow recovery first.
+      final staging = await Directory(internal.path).createTemp('rtpath-bulk-');
+      final Directory bulk;
+      try {
+        for (var i = 0; i < 24000; i++) {
+          File('${staging.path}/entry-$i').createSync();
+        }
+        bulk = await staging.rename('${fixture.path}/bulk');
+      } finally {
+        if (await staging.exists()) await staging.delete(recursive: true);
       }
 
       final rescan = await api.startScan(internal.id, relative);
@@ -573,6 +581,87 @@ void main() {
       debugPrint(
         'RtPath phase 3: protected scope, cancellation, disconnect and index isolation verified',
       );
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    testWidgets('does not index its own SQLite writes through Root aliases', (
+      tester,
+    ) async {
+      if (restarted) return;
+      const package = 'io.github.eltancex.rtpath.testhost';
+      const indexFiles = '/data/data/$package/no_backup';
+      const alias = '/data/user/0/$package/no_backup';
+      final fixture = await Directory(alias).createTemp('rtpath-feedback-');
+      final name = fixture.path.split('/').last;
+      final unrelated = await File('${fixture.path}/root-index.sqlite')
+          .writeAsString('fixture');
+      final live = File('$alias/$name-probe.txt');
+      try {
+        for (final path in [indexFiles, alias]) {
+          await api.connectRoot();
+          final access = await _waitRoot(api);
+          expect(access.state, RootState.connected, reason: access.message);
+          final scan = await api.startRootScan(path);
+          final scope = scan.scopeId;
+          final published = await _waitFor(
+            api,
+            scan.taskId,
+            (it) => !_active(it),
+          );
+          expect(
+            published.state,
+            ScanState.completed,
+            reason: published.message,
+          );
+          expect(published.published, isTrue);
+          await _waitWatch(api, scope, WatchState.live);
+          await _runRoot(
+            "test -f '$path/root-index.sqlite' && test -f '$path/root-index.sqlite-wal' "
+            "&& test -f '$path/root-index.sqlite-shm'",
+          );
+          final ordinary = await api.find(scope, 'ordinary-index.sqlite');
+          expect(ordinary?.entries, isEmpty);
+          final root = await api.find(scope, 'root-index.sqlite');
+          expect(root?.entries.single.path, '$path/$name/root-index.sqlite');
+          await unrelated.writeAsString('new bytes');
+          await _waitForPage(
+            api,
+            scope,
+            'root-index.sqlite',
+            (it) => it.entries.singleOrNull?.bytes == 9,
+          );
+          final before = (await api.watchStatus(scope))!.revision;
+          for (var size = 1; size <= 4; size++) {
+            await live.writeAsString('x' * size);
+            await _waitForPage(
+              api,
+              scope,
+              '$name-probe.txt',
+              (it) => it.entries.singleOrNull?.bytes == size,
+            );
+          }
+          final revision = (await api.watchStatus(scope))!.revision;
+          expect(revision, greaterThan(before));
+          await Future<void>.delayed(const Duration(seconds: 2));
+          final quiet = await api.watchStatus(scope);
+          expect(quiet?.state, WatchState.live);
+          expect(quiet?.revision, revision);
+          expect(
+            (await api.find(scope, 'root-index.sqlite'))?.entries.single.path,
+            '$path/$name/root-index.sqlite',
+          );
+          debugPrint(
+            'RtPath phase 4: SQLite feedback excluded via ${path.substring(0, path.indexOf(package))} '
+            '(revision $before → $revision, unchanged for 2s)',
+          );
+          await api.disconnectRoot();
+          await unrelated.writeAsString('fixture');
+          await live.delete();
+        }
+      } finally {
+        await api.disconnectRoot();
+        if (await live.exists()) await live.delete();
+        await fixture.delete(recursive: true);
+      }
     }, timeout: const Timeout(Duration(minutes: 2)));
   }
 

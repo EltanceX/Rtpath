@@ -120,7 +120,7 @@ class RootScannerService : RootService() {
         try {
             RootWire.writeHeader(output, job.id)
             val result = NativeScanner.run(
-                scope, expected,
+                scope, File(applicationInfo.dataDir, "no_backup").absolutePath, expected,
                 object : ScanReceiver {
                     override fun isCancelled() = job.cancelled
                     override fun onBatch(batch: ByteArray) = RootWire.writeBatch(output, batch)

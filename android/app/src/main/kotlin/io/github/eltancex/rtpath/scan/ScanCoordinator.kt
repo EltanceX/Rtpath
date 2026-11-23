@@ -15,8 +15,9 @@ import java.util.concurrent.TimeUnit
 internal class ScanCoordinator private constructor(context: Context) {
     val locations = ScanLocations(context)
     val root = RootBackend(context)
-    private val ordinaryStore by lazy { IndexStore(File(context.noBackupFilesDir, "ordinary-index.sqlite")) }
-    private val rootStore by lazy { IndexStore(File(context.noBackupFilesDir, "root-index.sqlite")) }
+    private val indexDirectory by lazy { context.noBackupFilesDir }
+    private val ordinaryStore by lazy { IndexStore(File(indexDirectory, "ordinary-index.sqlite")) }
+    private val rootStore by lazy { IndexStore(File(indexDirectory, "root-index.sqlite")) }
     // Each database has one writer, including its baseline and incremental commits.
     private val ordinaryWriter = Executors.newSingleThreadExecutor()
     private val rootWriter = Executors.newSingleThreadExecutor()
@@ -308,7 +309,7 @@ internal class ScanCoordinator private constructor(context: Context) {
                     try {
                         val expected = session.recovery?.expected ?: ScopeIdentity()
                         val outcome = if (remote != null) root.run(remote, generation, scope, expected, receiver)
-                        else NativeScanner.run(scope, expected, receiver)
+                        else NativeScanner.run(scope, indexDirectory.absolutePath, expected, receiver)
                         if (outcome == NativeScanner.FAILED) {
                             reason = reason ?: synchronized(lock) { latest?.takeIf { it.taskId == generation }?.message }
                                 ?: "原生扫描失败"

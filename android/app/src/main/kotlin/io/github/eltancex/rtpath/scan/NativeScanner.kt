@@ -28,13 +28,14 @@ internal object NativeScanner {
         System.loadLibrary("rtpath_probe")
     }
 
-    fun run(scope: ScanScope, expected: ScopeIdentity, receiver: ScanReceiver): Int = walk(
+    fun run(scope: ScanScope, indexDirectory: String, expected: ScopeIdentity, receiver: ScanReceiver): Int = walk(
         scope.base.toByteArray(Charsets.UTF_8), scope.relativePath.toByteArray(Charsets.UTF_8),
-        expected.mount, expected.device, expected.inode, receiver,
+        indexDirectory.toByteArray(Charsets.UTF_8), expected.mount, expected.device, expected.inode, receiver,
     )
 
     private external fun walk(
-        basePath: ByteArray, relativePath: ByteArray, mount: Long, device: Long, inode: Long, receiver: ScanReceiver,
+        basePath: ByteArray, relativePath: ByteArray, indexDirectoryPath: ByteArray,
+        mount: Long, device: Long, inode: Long, receiver: ScanReceiver,
     ): Int
 
     external fun inspectDirectory(absolutePath: ByteArray, mark: Boolean, exercise: Boolean): String

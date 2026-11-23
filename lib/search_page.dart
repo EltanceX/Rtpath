@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -21,7 +22,12 @@ class _SearchScreenState extends State<SearchScreen>
   final _relative = TextEditingController();
   final _absolute = TextEditingController();
   final _query = TextEditingController();
-  final _scroll = ScrollController();
+  late final _scroll = ScrollController(
+    onAttach: (position) =>
+        position.isScrollingNotifier.addListener(_scrollingChanged),
+    onDetach: (position) =>
+        position.isScrollingNotifier.removeListener(_scrollingChanged),
+  );
   final _items = <SearchEntry>[];
   List<ScanLocation> _locations = [];
   List<PublishedIndex> _indexes = [];
@@ -30,6 +36,8 @@ class _SearchScreenState extends State<SearchScreen>
   SearchOrder _order = SearchOrder.name;
   bool _descending = false;
   bool _fetching = false;
+  bool _refreshing = false;
+  bool _needsMore = false;
   bool _waitingForInput = false;
   String? _locationId;
   String? _scopeId;
@@ -59,6 +67,9 @@ class _SearchScreenState extends State<SearchScreen>
   bool get _scanActive =>
       _status?.state == ScanState.running ||
       _status?.state == ScanState.cancelling;
+
+  bool get _scrolling =>
+      _scroll.hasClients && _scroll.position.isScrollingNotifier.value;
 
   @override
   void initState() {
@@ -158,7 +169,12 @@ class _SearchScreenState extends State<SearchScreen>
   void _onWatch(WatchStatus status) {
     if (!mounted || _scopeId != status.scopeId) return;
     ++_watchRequest;
-    setState(() => _watch = status);
+    final previous = _watch;
+    _watch = status;
+    if (status.state != previous?.state ||
+        _watchDescription(status) != _watchDescription(previous)) {
+      setState(() {});
+    }
     if (status.state == WatchState.recovering &&
         _status?.taskId != status.generation) {
       _schedulePoll();
@@ -166,38 +182,48 @@ class _SearchScreenState extends State<SearchScreen>
     _scheduleLiveRefresh();
   }
 
-  void _scheduleLiveRefresh() {
+  bool get _hasLiveUpdate {
     final status = _watch;
     final displayed = _displayGeneration;
+    if (status == null || displayed == null) return false;
+    if (status.generation == displayed) {
+      return status.revision > _displayRevision;
+    }
+    return status.state == WatchState.live ||
+        status.state == WatchState.limited;
+  }
+
+  void _scrollingChanged() {
+    if (_scrolling) {
+      _liveRefresh?.cancel();
+    } else {
+      _scheduleLiveRefresh();
+    }
+  }
+
+  void _scheduleLiveRefresh() {
     if (_fetching ||
         _waitingForInput ||
+        _scrolling ||
+        _searchError != null ||
         (_liveRefresh?.isActive ?? false) ||
-        status == null ||
-        displayed == null) {
+        (!_hasLiveUpdate && !_needsMore)) {
       return;
     }
-    if (status.generation == displayed) {
-      if (status.revision <= _displayRevision) return;
-    } else if (status.state != WatchState.live &&
-        status.state != WatchState.limited) {
-      return;
-    }
-    _liveRefresh = Timer(const Duration(milliseconds: 60), () {
-      if (mounted && !_waitingForInput && !_fetching) {
-        unawaited(_search(live: true));
+    _liveRefresh = Timer(const Duration(milliseconds: 150), () {
+      if (mounted && !_waitingForInput && !_fetching && !_scrolling) {
+        unawaited(_fetch(_searchRequest, null, replace: true));
       }
     });
   }
 
-  Future<void> _search({bool live = false}) async {
+  Future<void> _search() async {
     _debounce?.cancel();
     _liveRefresh?.cancel();
     final request = ++_searchRequest;
-    if (!live) {
-      setState(_clearResults);
-      if (_scroll.hasClients) _scroll.jumpTo(0);
-    }
-    await _fetch(request, null, replace: live);
+    setState(_clearResults);
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+    await _fetch(request, null);
   }
 
   void _clearResults() {
@@ -205,6 +231,8 @@ class _SearchScreenState extends State<SearchScreen>
     _next = null;
     _searchError = null;
     _fetching = false;
+    _refreshing = false;
+    _needsMore = false;
     _waitingForInput = false;
     _displayGeneration = null;
     _displayRevision = 0;
@@ -216,17 +244,23 @@ class _SearchScreenState extends State<SearchScreen>
     bool replace = false,
   }) async {
     final scope = _scopeId;
-    if (scope == null || _fetching) return;
+    if (scope == null || _fetching || (replace && _scrolling)) return;
     final text = _query.text;
     final order = _order;
     final descending = _descending;
-    setState(() {
-      _fetching = true;
-      _searchError = null;
-    });
+    _fetching = true;
+    _refreshing = replace;
+    if (!replace || _searchError != null) {
+      setState(() => _searchError = null);
+    }
     try {
       var position = cursor;
+      final refreshed = <SearchEntry>[];
+      // Keep the loaded prefix. A stale continuation also requests more rows.
+      final loadingMore = _needsMore;
+      final target = _items.length + (loadingMore ? 1 : 0);
       while (mounted && request == _searchRequest) {
+        if (replace && _scrolling) return;
         final page = await _api.search(
           scope,
           text,
@@ -234,44 +268,58 @@ class _SearchScreenState extends State<SearchScreen>
           descending,
           position,
         );
-        if (!mounted || request != _searchRequest) return;
+        if (!mounted || request != _searchRequest || (replace && _scrolling)) {
+          return;
+        }
         if (page == null) {
           setState(() {
-            _items.clear();
-            _next = null;
+            if (!replace) {
+              _items.clear();
+              _next = null;
+            }
             _searchError = '该索引范围当前不可用';
           });
           return;
         }
         if (page.reset) {
-          if (replace) {
-            position = null;
-            continue;
-          }
-          await _search();
+          // A write invalidated the cursor. Keep the current rows until we
+          // can load a consistent prefix from the newer revision.
+          if (!replace) _needsMore = true;
           return;
         }
-        if (page.entries.isEmpty && page.next != null) {
+        if (replace) refreshed.addAll(page.entries);
+        if (page.next != null &&
+            (replace ? refreshed.length < target : page.entries.isEmpty)) {
           position = page.next;
           await Future<void>.delayed(Duration.zero);
           continue;
         }
-        setState(() {
-          if (replace) _items.clear();
-          _items.addAll(page.entries);
-          _next = page.next;
-          _displayGeneration = page.generation;
-          _displayRevision = page.revision;
-        });
+        final hadNext = _next != null;
+        _next = page.next;
+        _displayGeneration = page.generation;
+        _displayRevision = page.revision;
+        if (!replace || !listEquals(_items, refreshed)) {
+          setState(() {
+            if (replace) _items.clear();
+            _items.addAll(replace ? refreshed : page.entries);
+          });
+        } else if (hadNext != (_next != null)) {
+          setState(() {});
+        }
+        if (loadingMore || _next == null) _needsMore = false;
         return;
       }
     } catch (error) {
-      if (!mounted || request != _searchRequest) return;
+      if (!mounted || request != _searchRequest || (replace && _scrolling)) {
+        return;
+      }
       setState(() => _searchError = _message(error));
     } finally {
       if (mounted && request == _searchRequest) {
-        setState(() => _fetching = false);
-        if (_searchError == null) _scheduleLiveRefresh();
+        _fetching = false;
+        _refreshing = false;
+        if (!replace) setState(() {});
+        _scheduleLiveRefresh();
       }
     }
   }
@@ -282,6 +330,15 @@ class _SearchScreenState extends State<SearchScreen>
         _searchError == null &&
         _scroll.position.extentAfter < 480 &&
         _scroll.position.pixels > 0) {
+      _loadMore();
+    }
+  }
+
+  void _loadMore() {
+    if (_needsMore || _hasLiveUpdate) {
+      _needsMore = true;
+      _scheduleLiveRefresh();
+    } else {
       unawaited(_fetch(_searchRequest, _next));
     }
   }
@@ -414,7 +471,7 @@ class _SearchScreenState extends State<SearchScreen>
     try {
       final access = await _api.rootAccess();
       if (!mounted || !_rootMode || request != _rootRequest) return;
-      setState(() => _root = access);
+      if (_root != access) setState(() => _root = access);
       if (access.state == RootState.requesting ||
           access.state == RootState.connected) {
         _rootPoll = Timer(const Duration(milliseconds: 650), _refreshRoot);
@@ -622,18 +679,19 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
-  Widget _watchLabel() {
-    final watch = _watch;
-    final label = switch (watch?.state) {
-      WatchState.starting => '正在建立监听',
-      WatchState.live => '实时更新 · ${watch!.watched} 个目录',
-      WatchState.limited => '部分实时覆盖 · ${watch!.message}',
-      WatchState.stopped => '实时更新已停止 · ${watch!.message ?? '可重新扫描'}',
-      WatchState.recovering => '正在校验索引 · ${watch!.message ?? '保留历史结果'}',
-      null => '历史索引 · 等待校验',
-    };
-    return Text(label, style: Theme.of(context).textTheme.bodySmall);
-  }
+  String _watchDescription(WatchStatus? watch) => switch (watch?.state) {
+    WatchState.starting => '正在建立监听',
+    WatchState.live => '实时更新 · ${watch!.watched} 个目录',
+    WatchState.limited => '部分实时覆盖 · ${watch!.message}',
+    WatchState.stopped => '实时更新已停止 · ${watch!.message ?? '可重新扫描'}',
+    WatchState.recovering => '正在校验索引 · ${watch!.message ?? '保留历史结果'}',
+    null => '历史索引 · 等待校验',
+  };
+
+  Widget _watchLabel() => Text(
+    _watchDescription(_watch),
+    style: Theme.of(context).textTheme.bodySmall,
+  );
 
   Widget _searchToolbar(BuildContext context) => Material(
     color: Theme.of(context).colorScheme.surface,
@@ -714,27 +772,31 @@ class _SearchScreenState extends State<SearchScreen>
   );
 
   Widget _searchFooter() {
-    if (_fetching || _waitingForInput) return const LinearProgressIndicator();
+    if ((_fetching && !_refreshing) || _waitingForInput) {
+      return const LinearProgressIndicator();
+    }
     if (_searchError case final error?) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(error),
-          if (_next != null)
-            TextButton(
-              onPressed: () => _fetch(_searchRequest, _next),
-              child: const Text('重试加载'),
-            ),
+          TextButton(
+            onPressed: () {
+              if (_needsMore || _hasLiveUpdate) {
+                unawaited(_fetch(_searchRequest, null, replace: true));
+              } else {
+                unawaited(_fetch(_searchRequest, _next));
+              }
+            },
+            child: const Text('重试加载'),
+          ),
         ],
       );
     }
     if (_next != null) {
       return Align(
         alignment: Alignment.centerLeft,
-        child: TextButton(
-          onPressed: () => _fetch(_searchRequest, _next),
-          child: const Text('加载更多'),
-        ),
+        child: TextButton(onPressed: _loadMore, child: const Text('加载更多')),
       );
     }
     return Text(_items.isEmpty ? '没有匹配的文件或目录' : '${_items.length} 条结果');

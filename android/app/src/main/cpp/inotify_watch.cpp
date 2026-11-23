@@ -1,4 +1,5 @@
 #include "inotify_watch.h"
+#include "index_files.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -43,7 +44,7 @@ InotifyWatch::InotifyWatch() : fd_(inotify_init1(IN_NONBLOCK | IN_CLOEXEC)) {
     if (fd() < 0) gap("inotify_init1", errno);
 }
 
-bool InotifyWatch::add(const std::string& path, int directory) {
+bool InotifyWatch::add(const std::string& path, int directory, bool containsIndexFiles) {
 #ifdef RTPATH_TEST_HOST
     const auto testLimit = testWatchCap.load();
     if (testLimit > 0 && !paths_.contains(path) && paths_.size() >= static_cast<std::size_t>(testLimit)) {
@@ -65,11 +66,11 @@ bool InotifyWatch::add(const std::string& path, int directory) {
     if (const auto old = paths_.find(path); old != paths_.end() && old->second != descriptor) {
         remove(old->second);
     }
-    if (const auto old = descriptors_.find(descriptor); old != descriptors_.end() && old->second != path) {
-        paths_.erase(old->second);
+    if (const auto old = descriptors_.find(descriptor); old != descriptors_.end() && old->second.path != path) {
+        paths_.erase(old->second.path);
     }
     paths_[path] = descriptor;
-    descriptors_[descriptor] = path;
+    descriptors_.insert_or_assign(descriptor, WatchedDirectory{path, containsIndexFiles});
     failed_.erase(path);
     return true;
 }
@@ -77,7 +78,7 @@ bool InotifyWatch::add(const std::string& path, int directory) {
 void InotifyWatch::remove(int descriptor) {
     const auto it = descriptors_.find(descriptor);
     if (it == descriptors_.end()) return;
-    paths_.erase(it->second);
+    paths_.erase(it->second.path);
     descriptors_.erase(it);
     inotify_rm_watch(fd(), descriptor);
 }
@@ -132,7 +133,7 @@ void InotifyWatch::event(int descriptor, std::uint32_t mask, std::uint32_t cooki
     }
     const auto it = descriptors_.find(descriptor);
     if (it == descriptors_.end()) return;
-    const auto& parent = it->second;
+    const auto& [parent, containsIndexFiles] = it->second;
     if ((mask & IN_UNMOUNT) || (parent.empty() && (mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED)))) {
         gap("inotify scope moved, deleted or unmounted", ESTALE);
         return;
@@ -147,6 +148,8 @@ void InotifyWatch::event(int descriptor, std::uint32_t mask, std::uint32_t cooki
         if (!parent.empty() && (mask & (IN_DELETE_SELF | IN_ATTRIB))) dirty(parent);
         return;
     }
+    // A commit writes the index WAL. Queuing those events would cause another commit.
+    if (containsIndexFiles && isIndexFile(name)) return;
 
     auto path = parent.empty() ? std::string(name) : parent + "/" + name;
     if (cookie != 0 && (mask & IN_MOVED_FROM)) {

@@ -1,4 +1,5 @@
 #include "fd.h"
+#include "index_files.h"
 #include "inotify_watch.h"
 
 #include <android/api-level.h>
@@ -314,11 +315,17 @@ public:
         buffer_.reserve(batchSize * 96);
     }
 
-    Outcome scan(const std::string& base, const std::string& relative,
+    Outcome scan(const std::string& base, const std::string& relative, const std::string& indexDirectory,
                  std::uint64_t expectedMount, std::uint64_t expectedDevice, std::uint64_t expectedInode) {
         if (!gap_ || env_->ExceptionCheck()) return failed;
         if (stopping()) return cancelled;
 
+        // Resolve the application's database directory in this process's mount view.
+        // /data/data and /data/user/0 can name the same directory through different mounts.
+        if (stat(indexDirectory.c_str(), &indexDirectory_) != 0) {
+            issue("identify index directory", errno);
+            return failed;
+        }
         root_ = openRoot(base, relative);
         if (root_.get() < 0 || fstat(root_.get(), &rootInfo_) != 0) {
             issue("open root", errno);
@@ -408,6 +415,7 @@ private:
         struct stat info;
         std::string path;
         bool watched;
+        bool containsIndexFiles;
     };
 
     Outcome walk(Fd start, const struct stat& info, std::string path) {
@@ -504,9 +512,10 @@ private:
     bool pushDirectory(Fd directory, std::uint64_t id, const struct stat& info, std::string path) {
         Directory stream(fdopendir(directory.get()), closedir);
         if (!stream) return false;
-        const bool watched = watch_.fd() >= 0 && watch_.add(path, directory.get());
+        const bool containsIndexFiles = sameFile(indexDirectory_, info);
+        const bool watched = watch_.fd() >= 0 && watch_.add(path, directory.get(), containsIndexFiles);
         directory.release();
-        stack_.push_back({std::move(stream), id, info, std::move(path), watched});
+        stack_.push_back({std::move(stream), id, info, std::move(path), watched, containsIndexFiles});
         ++directories_;
         return true;
     }
@@ -520,6 +529,7 @@ private:
     }
 
     void scanChild(int parent, const Frame& frame, const char* name) {
+        if (frame.containsIndexFiles && rtpath::isIndexFile(name)) return;
         Metadata metadata;
         const auto retry = [&](const char* operation, int error) {
             if (frame.watched && disappeared(error)) watch_.dirty(join(frame.path, name));
@@ -602,7 +612,7 @@ private:
         previous = path;
         if (path.empty()) {
             if (!checkRoot(base, relative)) return false;
-            if (!watch_.add(path, root_.get())) return true;
+            if (!watch_.add(path, root_.get(), sameFile(indexDirectory_, rootInfo_))) return true;
             watch_.gap("inotify scope watch restored", ENODATA);
             return false;
         }
@@ -623,7 +633,7 @@ private:
             watch_.gap("inotify entry remounted", ESTALE);
             return false;
         }
-        if (!watch_.add(path, directory.get())) return true;
+        if (!watch_.add(path, directory.get(), sameFile(indexDirectory_, info))) return true;
 
         const auto began = std::chrono::steady_clock::now();
         watch_.forget(path, true);
@@ -647,6 +657,14 @@ private:
         auto parent = openParent(base);
         if (parent.get() < 0) return watch_.error() == 0;
         const auto* name = path.empty() ? "." : path.c_str() + (slash == path.npos ? 0 : slash + 1);
+        if (rtpath::isIndexFile(name)) {
+            struct stat info {};
+            if (fstat(parent.get(), &info) != 0) {
+                watch_.gap("read inotify parent metadata", errno);
+                return false;
+            }
+            if (sameFile(indexDirectory_, info)) return true;
+        }
         Metadata current;
         if (!metadataAt(parent.get(), name, current)) {
             const int error = errno;
@@ -771,6 +789,7 @@ private:
     bool fuse_ = false;
     Fd root_;
     struct stat rootInfo_ {};
+    struct stat indexDirectory_ {};
     rtpath::InotifyWatch watch_;
 };
 
@@ -778,7 +797,7 @@ private:
 
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
-    JNIEnv* env, jobject, jbyteArray basePath, jbyteArray relativePath,
+    JNIEnv* env, jobject, jbyteArray basePath, jbyteArray relativePath, jbyteArray indexDirectoryPath,
     jlong expectedMount, jlong expectedDevice, jlong expectedInode, jobject receiver
 ) {
     try {
@@ -786,7 +805,9 @@ Java_io_github_eltancex_rtpath_scan_NativeScanner_walk(
         if (env->ExceptionCheck()) return failed;
         const auto relative = bytes(env, relativePath);
         if (env->ExceptionCheck()) return failed;
-        return Scanner(env, receiver).scan(base, relative, expectedMount, expectedDevice, expectedInode);
+        const auto indexDirectory = bytes(env, indexDirectoryPath);
+        if (env->ExceptionCheck()) return failed;
+        return Scanner(env, receiver).scan(base, relative, indexDirectory, expectedMount, expectedDevice, expectedInode);
     } catch (const std::bad_alloc&) {
         const auto exception = env->FindClass("java/lang/OutOfMemoryError");
         if (exception) env->ThrowNew(exception, "Could not allocate native scanner memory");

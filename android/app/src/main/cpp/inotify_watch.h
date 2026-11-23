@@ -24,7 +24,7 @@ public:
     std::uint64_t sequence() const { return sequence_; }
     bool hasPending() const { return !pending_.empty() || !moves_.empty(); }
 
-    bool add(const std::string& path, int directory);
+    bool add(const std::string& path, int directory, bool containsIndexFiles);
     void forget(const std::string& path, bool keepDirectory = false);
     std::optional<std::string> nextFailed(const std::string& after) const;
     void dirty(std::string path);
@@ -33,12 +33,17 @@ public:
     std::set<std::string> takePending();
 
 private:
+    struct WatchedDirectory {
+        std::string path;
+        bool containsIndexFiles;
+    };
+
     void remove(int descriptor);
     void event(int descriptor, std::uint32_t mask, std::uint32_t cookie, const char* name);
 
     Fd fd_;
     std::map<std::string, int> paths_;
-    std::unordered_map<int, std::string> descriptors_;
+    std::unordered_map<int, WatchedDirectory> descriptors_;
     std::set<std::string> failed_;
     std::set<std::string> pending_;
     std::unordered_map<std::uint32_t, std::string> moves_;
